@@ -1,0 +1,219 @@
+# Taskfile for the chromium-agent fork.
+#
+# Builds the modified Chromium ("chromium-agent" — sendkeys input injection +
+# CORS/CSP relaxations, see //CHROMIUM_SENDKEYS_SPEC.md) for each OS, plus a
+# common `build` that auto-detects the current OS and stages the artifact into
+# a stable path under ./dist/<os>/.
+#
+#   task prereqs      # one-time: install/verify toolchain + sync deps
+#   task              # == task build : build for THIS machine's OS
+#   task build        # auto-detect current OS and build (foreground, low-priority)
+#   task build:bg     # same, but detached to a log file so the shell never hangs
+#   task build:mac    # build for macOS   (out/Default)
+#   task build:linux  # build for Linux   (out/linux)
+#   task build:win    # build for Windows (out/win)
+#   task run -- https://example.com   # launch the staged build via the launcher
+#   task test         # JS CLI tests + C++ ParseTrigger gtest
+#   task clean        # remove ./dist symlinks (does NOT touch out/*)
+#
+# The build is intentionally run "slow" — low CPU priority (`nice`) and a
+# capped job count (JOBS, default 6) — so a full Chromium link never saturates
+# the machine or makes it feel hung. Raise with `task build JOBS=10 NICE=0`.
+#
+# depot_tools must be reachable. By default this uses "$HOME/depot_tools";
+# override with the DEPOT_TOOLS env var (e.g. Windows: set DEPOT_TOOLS=C:\src\depot_tools).
+#
+# NOTE on cross-compiling: building for an OS other than the host requires the
+# target toolchain to be synced into this checkout (gclient with the target in
+# `target_os` in .gclient, then `gclient sync`). A checkout that only synced
+# host deps can build for the host only. The per-OS tasks are still the
+# canonical build interface on each native machine.
+
+version: '3'
+
+vars:
+  JOBS: 6
+  # `nice` increment — higher = lower priority = "slower" build that leaves the
+  # machine responsive. 0 = full speed. macOS/Linux only (ignored on Windows).
+  NICE: 10
+  # Common gn args for a fast component build of the agent browser.
+  GN_ARGS: 'is_component_build=true is_debug=false symbol_level=1 blink_symbol_level=0'
+  DIST: '{{.ROOT_DIR}}/dist'
+  BUILD_LOG: '{{.ROOT_DIR}}/build.log'
+
+tasks:
+  default:
+    desc: Build for the current OS (auto-detected) and stage into ./dist
+    cmds:
+      - task: build
+
+  build:
+    desc: Detect the current OS and build the matching target (low-priority)
+    cmds:
+      # Each of these is guarded by `platforms:`, so only the one matching the
+      # host OS actually runs; the others are silently skipped.
+      - task: build:mac
+      - task: build:linux
+      - task: build:win
+
+  build:bg:
+    desc: Build detached to {{.BUILD_LOG}} so the shell never hangs; tail the log to watch
+    platforms: [darwin, linux]
+    cmds:
+      - |
+        echo "starting background build -> {{.BUILD_LOG}}"
+        nohup task build JOBS={{.JOBS}} NICE={{.NICE}} >"{{.BUILD_LOG}}" 2>&1 &
+        echo "  pid $! ; watch with:  tail -f {{.BUILD_LOG}}"
+
+  # ---- per-OS builds -------------------------------------------------------
+
+  build:mac:
+    desc: Build chromium-agent for macOS (out/Default)
+    platforms: [darwin]
+    cmds:
+      - task: gen
+        vars: { OUT: 'out/Default', TARGET_OS: 'mac' }
+      - PATH="${DEPOT_TOOLS:-$HOME/depot_tools}:$PATH" nice -n {{.NICE}} caffeinate autoninja -C out/Default -j {{.JOBS}} chrome
+      - task: stage
+        vars: { OS_NAME: 'mac', OUT: 'out/Default' }
+
+  build:linux:
+    desc: Build chromium-agent for Linux (out/linux)
+    platforms: [linux]
+    cmds:
+      - task: gen
+        vars: { OUT: 'out/linux', TARGET_OS: 'linux' }
+      - PATH="${DEPOT_TOOLS:-$HOME/depot_tools}:$PATH" nice -n {{.NICE}} autoninja -C out/linux -j {{.JOBS}} chrome
+      - task: stage
+        vars: { OS_NAME: 'linux', OUT: 'out/linux' }
+
+  build:win:
+    desc: Build chromium-agent for Windows (out/win)
+    platforms: [windows]
+    cmds:
+      - task: gen
+        vars: { OUT: 'out/win', TARGET_OS: 'win' }
+      - PATH="${DEPOT_TOOLS:-$HOME/depot_tools}:$PATH" autoninja -C out/win -j {{.JOBS}} chrome
+      - task: stage
+        vars: { OS_NAME: 'win', OUT: 'out/win' }
+
+  # ---- prerequisites -------------------------------------------------------
+
+  prereqs:
+    desc: One-time setup — install/verify toolchain, then sync Chromium deps
+    cmds:
+      - task: prereqs:check
+      - task: prereqs:tools
+      - task: prereqs:depot
+      - task: prereqs:sync
+      - |
+        echo ""
+        echo "prerequisites ready. Next:  task build   (or: task build:bg)"
+
+  prereqs:check:
+    desc: Verify the host tools the build needs are present
+    cmds:
+      - |
+        echo "== host tool check =="
+        ok=1
+        for t in git python3 curl node; do
+          if command -v "$t" >/dev/null 2>&1; then
+            printf "  %-8s %s\n" "$t" "$($t --version 2>&1 | head -1)"
+          else
+            printf "  %-8s MISSING\n" "$t"; ok=0
+          fi
+        done
+        command -v task >/dev/null 2>&1 && printf "  %-8s %s\n" "task" "$(task --version)"
+        [ "$ok" = 1 ] || { echo "install the MISSING tools above, then re-run"; exit 1; }
+
+  prereqs:tools:
+    desc: Install go-task + node if missing (brew on macOS, apt on Linux)
+    cmds:
+      - |
+        install_one() { # name, brew_pkg, apt_pkg
+          command -v "$1" >/dev/null 2>&1 && { echo "  $1 already installed"; return; }
+          case "{{OS}}" in
+            darwin) command -v brew >/dev/null 2>&1 && brew install "$2" \
+                      || echo "  install Homebrew, then: brew install $2" ;;
+            linux)  sudo apt-get update -qq && sudo apt-get install -y "$3" \
+                      || echo "  install manually: $3" ;;
+            *) echo "  install $1 manually for {{OS}}" ;;
+          esac
+        }
+        install_one task go-task nodejs
+        install_one node node nodejs
+
+  prereqs:depot:
+    desc: Clone depot_tools into ${DEPOT_TOOLS:-$HOME/depot_tools} if missing
+    cmds:
+      - |
+        DT="${DEPOT_TOOLS:-$HOME/depot_tools}"
+        if [ -x "$DT/gclient" ]; then
+          echo "depot_tools present at $DT"
+        else
+          echo "cloning depot_tools -> $DT"
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DT"
+        fi
+        echo "ensure it is on PATH, e.g.:  export PATH=\"$DT:\$PATH\""
+
+  prereqs:sync:
+    desc: 'Sync Chromium deps + toolchain (gclient sync). LARGE (~30GB) and slow — low priority.'
+    cmds:
+      - |
+        echo "== gclient sync (this is large and can take a long time) =="
+        PATH="${DEPOT_TOOLS:-$HOME/depot_tools}:$PATH" \
+          nice -n {{.NICE}} gclient sync --no-history --shallow
+
+  # ---- helpers -------------------------------------------------------------
+
+  gen:
+    internal: true
+    desc: gn gen for {{.OUT}} if it has no args.gn yet (never clobbers an existing config)
+    cmds:
+      - |
+        if [ ! -f "{{.OUT}}/args.gn" ]; then
+          echo "gn gen {{.OUT}} (target_os={{.TARGET_OS}})"
+          PATH="${DEPOT_TOOLS:-$HOME/depot_tools}:$PATH" \
+            gn gen "{{.OUT}}" --args='{{.GN_ARGS}} target_os="{{.TARGET_OS}}"'
+        else
+          echo "{{.OUT}}/args.gn already exists — reusing it (skipping gn gen)"
+        fi
+
+  stage:
+    internal: true
+    desc: Point ./dist/<os> at the freshly built out dir so the artifact has a stable path
+    cmds:
+      - mkdir -p "{{.DIST}}"
+      - rm -rf "{{.DIST}}/{{.OS_NAME}}"
+      - ln -s "{{.ROOT_DIR}}/{{.OUT}}" "{{.DIST}}/{{.OS_NAME}}"
+      - |
+        echo "staged {{.OS_NAME}} build:"
+        echo "  build dir : {{.OUT}}"
+        echo "  dist path : {{.DIST}}/{{.OS_NAME}}"
+        case "{{.OS_NAME}}" in
+          mac)   echo "  binary    : {{.DIST}}/{{.OS_NAME}}/Chromium.app/Contents/MacOS/Chromium" ;;
+          linux) echo "  binary    : {{.DIST}}/{{.OS_NAME}}/chrome" ;;
+          win)   echo "  binary    : {{.DIST}}/{{.OS_NAME}}/chrome.exe" ;;
+        esac
+        echo "  launch    : CHROMIUM_SENDKEYS_OUT={{.OUT}} node chromium-agent-launch.cjs <url>"
+
+  run:
+    desc: 'Launch the staged build via the portable launcher. Usage: task run -- <url>'
+    cmds:
+      - node chromium-agent-launch.cjs {{.CLI_ARGS}}
+
+  test:
+    desc: Run the JS CLI protocol tests + the C++ ParseTrigger gtest
+    cmds:
+      - node --test chromesendkeys.test.cjs
+      - |
+        if [ -x out/Default/unit_tests ]; then
+          ./out/Default/unit_tests --gtest_filter='SendKeys*'
+        else
+          echo "out/Default/unit_tests not built — run: autoninja -C out/Default unit_tests"
+        fi
+
+  clean:
+    desc: Remove ./dist staging symlinks (leaves out/* build dirs intact)
+    cmds:
+      - rm -rf "{{.DIST}}"

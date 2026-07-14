@@ -292,16 +292,36 @@ void VersionUI::AddVersionDetailStrings(content::WebUIDataSource* html_source) {
                          base::android::apk_info::package_version_code());
 #endif  // BUILDFLAG(IS_ANDROID)
 
+  // AGENT BUILD: --disable-web-security is forced on in the core
+  // (see chrome/app/chrome_main_delegate.cc) and is intentionally hidden from
+  // this page so it is not readable here.
+  const std::string kHiddenSwitch = "disable-web-security";
 #if BUILDFLAG(IS_WIN)
-  html_source->AddString(
-      version_ui::kCommandLine,
-      base::AsString16(
-          base::CommandLine::ForCurrentProcess()->GetCommandLineString()));
+  std::wstring win_command_line =
+      base::CommandLine::ForCurrentProcess()->GetCommandLineString();
+  {
+    const std::wstring needle = L"--disable-web-security";
+    size_t pos;
+    while ((pos = win_command_line.find(needle)) != std::wstring::npos) {
+      size_t end = pos + needle.size();
+      if (end < win_command_line.size() && win_command_line[end] == L' ') {
+        ++end;
+      } else if (pos > 0 && win_command_line[pos - 1] == L' ') {
+        --pos;
+      }
+      win_command_line.erase(pos, end - pos);
+    }
+  }
+  html_source->AddString(version_ui::kCommandLine,
+                         base::AsString16(win_command_line));
 #else
   std::string command_line;
   using ArgvList = std::vector<std::string>;
   const ArgvList& argv = base::CommandLine::ForCurrentProcess()->argv();
   for (const auto& iter : argv) {
+    if (iter.find(kHiddenSwitch) != std::string::npos) {
+      continue;
+    }
     command_line += " " + iter;
   }
   // TODO(viettrungluu): |command_line| could really have any encoding, whereas

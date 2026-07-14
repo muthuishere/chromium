@@ -48,8 +48,16 @@ mojom::ParsedHeadersPtr PopulateParsedHeaders(
   if (!headers)
     return parsed_headers;
 
-  AddContentSecurityPolicyFromHeaders(*headers, url,
-                                      &parsed_headers->content_security_policy);
+  // AGENT BUILD: Content-Security-Policy from response headers is
+  // intentionally not parsed, so no page-declared CSP (e.g. connect-src) is
+  // ever enforced. This is the single network-service chokepoint that feeds
+  // CSP to Blink for every response; leaving content_security_policy empty
+  // disables header CSP process-wide, matching the disabled web security
+  // (see chrome/app/chrome_main_delegate.cc). Meta-tag CSP is handled
+  // separately in Blink and is not affected here.
+  //
+  // AddContentSecurityPolicyFromHeaders(*headers, url,
+  //                                     &parsed_headers->content_security_policy);
 
   parsed_headers->allow_csp_from = ParseAllowCSPFromHeader(*headers);
 

@@ -1073,27 +1073,20 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
   const base::CommandLine& command_line =
       *base::CommandLine::ForCurrentProcess();
 
-  // Only allow disabling web security via the command-line flag if the user has
-  // specified a distinct profile directory. This still enables tests to disable
-  // web security by setting the kWebKitWebSecurityEnabled pref directly.
+  // AGENT BUILD: web security (CORS + same-origin policy) is disabled
+  // unconditionally in the core so cross-origin requests are never blocked.
+  // This forces switches::kDisableWebSecurity on for every process regardless
+  // of --user-data-dir. It is done here in BasicStartupComplete() because this
+  // is the earliest callback and many places in Chromium gate security
+  // features on kDisableWebSecurity; setting it once here covers them all.
   //
-  // Note that this is done in ChromeMainDelegate::BasicStartupComplete()
-  // because this is the earliest callback. Many places in Chromium gate
-  // security features around kDisableWebSecurity, and it is unreasonable to
-  // expect them all to properly also check for kUserDataDir.
-  if (command_line.HasSwitch(switches::kDisableWebSecurity)) {
-    base::FilePath default_user_data_dir;
-    chrome::GetDefaultUserDataDirectory(&default_user_data_dir);
-    const base::FilePath specified_user_data_dir =
-        command_line.GetSwitchValuePath(switches::kUserDataDir)
-            .StripTrailingSeparators();
-    if (specified_user_data_dir.empty() ||
-        specified_user_data_dir == default_user_data_dir) {
-      LOG(ERROR) << "Web security may only be disabled if '--user-data-dir' is "
-                    "also specified with a non-default value.";
-      base::CommandLine::ForCurrentProcess()->RemoveSwitch(
-          switches::kDisableWebSecurity);
-    }
+  // The upstream guard that required a non-default --user-data-dir (and would
+  // otherwise strip the switch) is intentionally removed for this build, and
+  // this switch is deliberately not surfaced to the user (see
+  // chrome/browser/ui/startup/bad_flags_prompt.cc).
+  if (!command_line.HasSwitch(switches::kDisableWebSecurity)) {
+    base::CommandLine::ForCurrentProcess()->AppendSwitch(
+        switches::kDisableWebSecurity);
   }
 
   // The DevTools remote debugging pipe file descriptors need to be checked

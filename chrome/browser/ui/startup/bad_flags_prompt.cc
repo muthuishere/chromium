@@ -95,7 +95,9 @@ const char* const kBadFlags[] = {
 #if BUILDFLAG(IS_WIN)
     sandbox::policy::switches::kAllowThirdPartyModules,
 #endif
-    switches::kDisableWebSecurity,
+    // AGENT BUILD: kDisableWebSecurity is forced on in the core
+    // (see chrome/app/chrome_main_delegate.cc) and deliberately not surfaced
+    // as a warning here.
     switches::kSingleProcess,
 
     // These flags disable or undermine the Same Origin Policy.

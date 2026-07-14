@@ -43,7 +43,7 @@ marking the entering and leaving of monitored scopes. This is
 done using a `WatchHangsInScope` object that is instantiated
 on the stack, at the beginning of the scope.
 
-### Example:
+### Example: monitored scope
 
 ```
 void FooBar(){
@@ -121,7 +121,7 @@ It's possible to keep such cases from triggering the detection of a hang.
 Invoking `HangWatcher::InvalidateActiveExpectations()` from within a
 scope will make sure that not hangs are logged while execution is within it.
 
-### Example:
+### Example: ignoring normal long running code
 
 ```
 void RunTask(Task task) {

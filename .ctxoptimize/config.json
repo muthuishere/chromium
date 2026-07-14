@@ -1,0 +1,146 @@
+{
+  "name": "chromium",
+  "modules": [
+    {
+      "path": "agents/skills"
+    },
+    {
+      "path": "chrome/test/data/third_party/spaceport"
+    },
+    {
+      "path": "third_party/android_deps"
+    },
+    {
+      "path": "third_party/android_deps/autorolled"
+    },
+    {
+      "path": "third_party/androidx"
+    },
+    {
+      "path": "third_party/blink/perf_tests/websocket"
+    },
+    {
+      "path": "third_party/blink/web_tests/webaudio/tools"
+    },
+    {
+      "path": "third_party/crashpad/crashpad/doc/appengine"
+    },
+    {
+      "path": "third_party/google-closure-library"
+    },
+    {
+      "path": "third_party/google-closure-library/closure-deps"
+    },
+    {
+      "path": "third_party/google-closure-library/scripts/release"
+    },
+    {
+      "path": "third_party/js_code_coverage"
+    },
+    {
+      "path": "third_party/mako/mako"
+    },
+    {
+      "path": "third_party/material_web_components"
+    },
+    {
+      "path": "third_party/mediapipe/src"
+    },
+    {
+      "path": "third_party/node"
+    },
+    {
+      "path": "third_party/polymer/v3_0"
+    },
+    {
+      "path": "third_party/protobuf/examples/go"
+    },
+    {
+      "path": "third_party/protobuf/java"
+    },
+    {
+      "path": "third_party/protobuf/java/bom"
+    },
+    {
+      "path": "third_party/protobuf/java/kotlin"
+    },
+    {
+      "path": "third_party/protobuf/java/protoc"
+    },
+    {
+      "path": "third_party/protobuf/java/test/linkage-monitor-check-bom"
+    },
+    {
+      "path": "third_party/protobuf/python/protobuf_distutils"
+    },
+    {
+      "path": "third_party/protobuf/ruby"
+    },
+    {
+      "path": "third_party/protobuf/rust/release_crates"
+    },
+    {
+      "path": "third_party/pycoverage"
+    },
+    {
+      "path": "third_party/pyjson5/src"
+    },
+    {
+      "path": "third_party/rust/chromium_crates_io"
+    },
+    {
+      "path": "third_party/six/src"
+    },
+    {
+      "path": "third_party/webgpu-cts"
+    },
+    {
+      "path": "third_party/wpt_tools/wpt/tools/wptrunner"
+    },
+    {
+      "path": "tools/android/dependency_analysis/js"
+    },
+    {
+      "path": "tools/code_coverage/js_source_maps/create_js_source_maps"
+    },
+    {
+      "path": "tools/code_coverage/js_source_maps/merge_js_source_maps"
+    },
+    {
+      "path": "tools/crates/gnrt"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package/bar"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package/foo"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package2"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package3"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package4"
+    },
+    {
+      "path": "tools/crates/gnrt/sample_package4/foo"
+    },
+    {
+      "path": "tools/grit"
+    },
+    {
+      "path": "tools/jj"
+    },
+    {
+      "path": "ui/file_manager/image_loader/piex"
+    },
+    {
+      "path": "ui/webui/resources/tools/codemods"
+    }
+  ]
+}

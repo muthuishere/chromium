@@ -68,6 +68,7 @@
 #include "chrome/browser/profiles/profiles_state.h"
 #include "chrome/browser/profiling_host/chrome_browser_main_extra_parts_profiling.h"
 #include "chrome/browser/segmentation_platform/chrome_browser_main_extra_parts_segmentation_platform.h"
+#include "chrome/browser/sendkeys_watcher.h"
 #include "chrome/browser/sessions/chrome_serialized_navigation_driver.h"
 #include "chrome/browser/shell_integration.h"
 #include "chrome/browser/startup_data.h"
@@ -633,6 +634,21 @@ class ChromeBrowserMainExtraPartsThreadNotifier final
   base::OnceClosure threads_ready_closure_;
 };
 
+// Fork-local input-injection spike, not upstream Chromium behavior. Starts
+// the CHROMIUM_SENDKEYS_DIR spool-directory watcher once the browser has
+// started (a tab is needed to inject into) and stops it before teardown.
+// See //CHROMIUM_SENDKEYS_SPEC.md.
+class ChromeBrowserMainExtraPartsSendKeys final
+    : public ChromeBrowserMainExtraParts {
+ public:
+  // ChromeBrowserMainExtraParts:
+  void PostBrowserStart() final { watcher_.Start(); }
+  void PostMainMessageLoopRun() final { watcher_.Stop(); }
+
+ private:
+  sendkeys::SendKeysWatcher watcher_;
+};
+
 }  // namespace
 
 // ChromeBrowserMainParts::ProfileInitManager ----------------------------------
@@ -744,6 +760,8 @@ std::unique_ptr<content::BrowserMainParts> ChromeBrowserMainParts::Create(
   main_parts->AddParts(
       std::make_unique<ChromeBrowserMainExtraPartsThreadNotifier>(
           std::move(threads_ready_closure)));
+
+  main_parts->AddParts(std::make_unique<ChromeBrowserMainExtraPartsSendKeys>());
 
   bool add_profiles_extra_parts = true;
 #if BUILDFLAG(IS_ANDROID)
