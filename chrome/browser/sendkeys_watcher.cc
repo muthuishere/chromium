@@ -26,9 +26,14 @@
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "base/values.h"
+#include "base/functional/callback_helpers.h"
 #include "chrome/browser/sendkeys_watcher_internal.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#include "chrome/browser/ui/tabs/tab_enums.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "components/input/native_web_keyboard_event.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "components/tabs/public/tab_interface.h"
@@ -44,6 +49,7 @@
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/events/keycodes/dom/dom_code.h"
 #include "ui/events/keycodes/dom/dom_key.h"
 #include "ui/events/keycodes/dom/keycode_converter.h"
@@ -509,6 +515,24 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     } else {
       LOG(WARNING) << "sendkeys: unrecognized NETLOG: line '" << line << "'";
     }
+  } else if (ConsumePrefix(line, "NEWTAB:", &rest)) {
+    // Tab/window commands may activate or destroy the active tab, invalidating
+    // the |rwh| captured above. They don't inject input, so return before the
+    // trailing observer re-attach touches a possibly-dangling |rwh|.
+    InjectNewTab(rest);
+    return;
+  } else if (ConsumePrefix(line, "NEWWINDOW:", &rest)) {
+    InjectNewWindow(rest);
+    return;
+  } else if (ConsumePrefix(line, "CLOSETAB:", &rest)) {
+    InjectCloseTab(rest);
+    return;
+  } else if (ConsumePrefix(line, "SELECTTAB:", &rest)) {
+    InjectSelectTab(rest);
+    return;
+  } else if (ConsumePrefix(line, "LISTTABS:", &rest)) {
+    InjectListTabs(rest);
+    return;
   } else {
     InjectText(rwh, line);
   }
@@ -571,6 +595,102 @@ void SendKeysWatcher::InjectGoto(content::WebContents* contents,
   content::NavigationController::LoadURLParams params(gurl);
   params.transition_type = ui::PAGE_TRANSITION_TYPED;
   contents->GetController().LoadURLWithParams(params);
+}
+
+void SendKeysWatcher::InjectNewTab(const std::string& url) {
+  BrowserWindowInterface* browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+  if (!browser) {
+    LOG(WARNING) << "sendkeys: NEWTAB: no active browser window";
+    return;
+  }
+  GURL gurl(url.empty() ? "about:blank" : url);
+  if (!gurl.is_valid()) {
+    gurl = GURL("about:blank");
+  }
+  NavigateParams params(browser, gurl, ui::PAGE_TRANSITION_TYPED);
+  params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
+  Navigate(&params, base::DoNothing());
+}
+
+void SendKeysWatcher::InjectNewWindow(const std::string& url) {
+  BrowserWindowInterface* browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+  if (!browser) {
+    LOG(WARNING) << "sendkeys: NEWWINDOW: no active browser window";
+    return;
+  }
+  GURL gurl(url.empty() ? "about:blank" : url);
+  if (!gurl.is_valid()) {
+    gurl = GURL("about:blank");
+  }
+  NavigateParams params(browser, gurl, ui::PAGE_TRANSITION_TYPED);
+  params.disposition = WindowOpenDisposition::NEW_WINDOW;
+  Navigate(&params, base::DoNothing());
+}
+
+void SendKeysWatcher::InjectCloseTab(const std::string& index_str) {
+  BrowserWindowInterface* browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+  if (!browser) {
+    LOG(WARNING) << "sendkeys: CLOSETAB: no active browser window";
+    return;
+  }
+  TabStripModel* tab_strip = browser->GetTabStripModel();
+  int index = tab_strip->active_index();
+  if (!index_str.empty() && !base::StringToInt(index_str, &index)) {
+    LOG(WARNING) << "sendkeys: CLOSETAB: bad index '" << index_str << "'";
+    return;
+  }
+  if (index < 0 || index >= tab_strip->count()) {
+    LOG(WARNING) << "sendkeys: CLOSETAB: index " << index << " out of range";
+    return;
+  }
+  tab_strip->CloseWebContentsAt(
+      index, CLOSE_USER_GESTURE | CLOSE_CREATE_HISTORICAL_TAB);
+}
+
+void SendKeysWatcher::InjectSelectTab(const std::string& index_str) {
+  BrowserWindowInterface* browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+  if (!browser) {
+    LOG(WARNING) << "sendkeys: SELECTTAB: no active browser window";
+    return;
+  }
+  TabStripModel* tab_strip = browser->GetTabStripModel();
+  int index = 0;
+  if (!base::StringToInt(index_str, &index)) {
+    LOG(WARNING) << "sendkeys: SELECTTAB: bad index '" << index_str << "'";
+    return;
+  }
+  if (index < 0 || index >= tab_strip->count()) {
+    LOG(WARNING) << "sendkeys: SELECTTAB: index " << index << " out of range";
+    return;
+  }
+  tab_strip->ActivateTabAt(index);
+}
+
+void SendKeysWatcher::InjectListTabs(const std::string& id) {
+  BrowserWindowInterface* browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+  base::ListValue tab_list;
+  if (browser) {
+    TabStripModel* tab_strip = browser->GetTabStripModel();
+    const int active = tab_strip->active_index();
+    for (int i = 0; i < tab_strip->count(); ++i) {
+      content::WebContents* wc = tab_strip->GetWebContentsAt(i);
+      base::DictValue tab;
+      tab.Set("index", i);
+      tab.Set("title", base::UTF16ToUTF8(wc->GetTitle()));
+      tab.Set("url", wc->GetLastCommittedURL().spec());
+      tab.Set("active", i == active);
+      tab_list.Append(std::move(tab));
+    }
+  }
+  base::DictValue result;
+  result.Set("ok", true);
+  result.Set("value", std::move(tab_list));
+  WriteResultFile(id, std::move(result));
 }
 
 void SendKeysWatcher::InjectScreenshot(content::WebContents* contents,

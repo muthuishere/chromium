@@ -338,6 +338,9 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 | `chrome/browser/ui/startup/bad_flags_prompt.cc`   | **Security relaxation:** drop `kDisableWebSecurity` from the bad-flags list (no warning infobar) |
 | `chrome/browser/ui/webui/version/version_ui.cc`   | **Security relaxation:** hide `--disable-web-security` from the `chrome://version` command-line field |
 | `services/network/public/cpp/parsed_headers.cc`   | **Security relaxation:** skip parsing `Content-Security-Policy` response headers (header CSP not enforced) |
+| `components/permissions/permission_context_base.cc` | **Security relaxation:** `DecidePermission()` auto-grants every permission (no prompt) — see below |
+| `components/os_crypt/common/keychain_password_mac.mm` | **Keychain-free profile:** `GetPassword()` reads the OSCrypt key from a file (`$CHROMIUM_AGENT_OSCRYPT_KEY_FILE` / `~/.config/chromium-agent/oscrypt.key`) before falling back to the macOS Keychain — no prompt, and decrypts a profile copied from another browser when seeded with its key |
+| `chrome/browser/sendkeys_watcher.{cc,h}` | Tab/window commands `NEWTAB`/`NEWWINDOW`/`CLOSETAB`/`SELECTTAB`/`LISTTABS` (act on the last-active window; `GOTO`/`EVAL` still target the active tab) |
 
 ## Security relaxations (agent build — CORS + CSP off)
 
@@ -417,9 +420,34 @@ disabled by this change. Header CSP (what LinkedIn and most sites use) is the
 common case; a site relying on meta CSP would need an additional Blink-side
 change. Not done here.
 
+### 3. Permission prompts — AUTO-GRANTED (never shown)
+
+An automation agent cannot click a permission dialog, so every permission is
+granted silently at the single decision chokepoint every capability funnels
+through:
+
+- **`components/permissions/permission_context_base.cc`** —
+  `PermissionContextBase::DecidePermission()` normally builds a
+  `PermissionRequest` and hands it to the `PermissionRequestManager`, which
+  shows a prompt. The body is replaced with an immediate
+  `NotifyPermissionSet(..., PermissionDecision::kAllow, is_final=true)`. This is
+  the **exact** result computation of a user clicking "Allow"
+  (`ComputeNewPermissionResult` → `GRANTED`), so the page sees a normal grant
+  with no UI and nothing observable. `persist=false` grants per-request instead
+  of writing a durable content setting, keeping the profile unmodified.
+
+Covers geolocation, notifications, camera, microphone, clipboard-read, MIDI
+sysex, sensors, and every other context that routes through the base class. (A
+few contexts override `DecidePermission` with a custom flow; camera/mic are
+already handled up-front by the launcher's `--use-fake-ui-for-media-stream`.)
+
+**Note:** meta-tag CSP (§2 caveat) and permission contexts that fully override
+`DecidePermission` are the only gaps. Not observed in practice for the target
+sites.
+
 ### Rebuilding after these changes
 
-All four files are compiled into `chrome` (the network-service one lives in the
+All five files are compiled into `chrome` (the network-service one lives in the
 widely-linked `//services/network/public/cpp` target, so it recompiles a bit
 more broadly). `autoninja -j 6 -C out/Default chrome` relinks. A running
 browser must be **relaunched** on the new binary to pick the changes up.

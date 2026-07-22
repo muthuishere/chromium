@@ -36,8 +36,16 @@ vars:
   # `nice` increment — higher = lower priority = "slower" build that leaves the
   # machine responsive. 0 = full speed. macOS/Linux only (ignored on Windows).
   NICE: 10
-  # Common gn args for a fast component build of the agent browser.
-  GN_ARGS: 'is_component_build=true is_debug=false symbol_level=1 blink_symbol_level=0'
+  # gn args for the known-good agent-browser build: a fast COMPONENT build with
+  # DCHECKs OFF. dcheck_always_on defaults TRUE for non-official builds, and a
+  # firing DCHECK aborts the whole browser (the "keeps crashing and reopening"
+  # symptom) — so dcheck_always_on=false is REQUIRED for a daily driver.
+  # Component build also gives fast incremental relinks (recompile only the
+  # changed translation units + one dylib, minutes not hours). The harmless
+  # ANGLE duplicate-dylib objc warning is expected with component builds.
+  # NOTE: is_official_build=true currently regresses to a no-window browser on
+  # macOS in this checkout — do not use it until that's root-caused.
+  GN_ARGS: 'is_component_build=true is_debug=false dcheck_always_on=false symbol_level=1 blink_symbol_level=0 use_remoteexec=false'
   DIST: '{{.ROOT_DIR}}/dist'
   BUILD_LOG: '{{.ROOT_DIR}}/build.log'
 

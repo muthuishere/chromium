@@ -611,52 +611,23 @@ void PermissionContextBase::DecidePermission(
     BrowserPermissionCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
-  // Under permission delegation, when we display a permission prompt, the
-  // origin displayed in the prompt should never differ from the top-level
-  // origin. Storage access API requests are excluded as they are expected to
-  // request permissions from the frame origin needing access.
-  DCHECK(PermissionsClient::Get()->CanBypassEmbeddingOriginCheck(
-             request_data->requesting_origin, request_data->embedding_origin) ||
-         request_data->requesting_origin == request_data->embedding_origin ||
-         content_settings_type_ == ContentSettingsType::STORAGE_ACCESS);
-
-  content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(
-      request_data->id.global_render_frame_host_id());
-  DCHECK(rfh);
-
-  content::WebContents* web_contents =
-      content::WebContents::FromRenderFrameHost(rfh);
-  PermissionRequestManager* permission_request_manager =
-      PermissionRequestManager::FromWebContents(web_contents);
-  // TODO(felt): sometimes |permission_request_manager| is null. This check is
-  // meant to prevent crashes. See crbug.com/457091.
-  if (!permission_request_manager) {
-    std::move(callback).Run(content::PermissionResult(
-        PermissionStatus::ASK, content::PermissionStatusSource::UNSPECIFIED));
-    return;
-  }
-
-  auto decided_cb = base::BindRepeating(
-      &PermissionContextBase::PermissionDecided, weak_factory_.GetWeakPtr());
-  auto cleanup_cb = base::BindOnce(&PermissionContextBase::CleanUpRequest,
-                                   weak_factory_.GetWeakPtr(), web_contents,
-                                   request_data->id);
-  PermissionRequestID permission_request_id = request_data->id;
-
-  std::unique_ptr<PermissionRequest> request =
-      CreatePermissionRequest(web_contents, std::move(request_data),
-                              std::move(decided_cb), std::move(cleanup_cb));
-
-  bool inserted =
-      pending_requests_
-          .insert(std::make_pair(
-              permission_request_id.ToString(),
-              std::make_pair(request->GetSafeRef(), std::move(callback))))
-          .second;
-
-  DCHECK(inserted) << "Duplicate id " << permission_request_id.ToString();
-
-  permission_request_manager->AddRequest(rfh, std::move(request));
+  // AGENT BUILD: auto-grant every permission instead of ever showing a prompt.
+  // This browser is driven by an automation agent, so a permission dialog would
+  // block it. Every capability that would otherwise prompt -- geolocation,
+  // notifications, camera, microphone, clipboard, MIDI, sensors, etc. -- is
+  // granted silently here. This reuses the exact result computation of a user
+  // clicking "Allow" (PermissionDecision::kAllow -> GRANTED via
+  // ComputeNewPermissionResult), so callers see a normal grant with no UI and
+  // nothing observable to the page. persist=true writes the durable ALLOW
+  // content setting so the grant is coherent everywhere: not only does
+  // requestPermission() resolve "granted", but the synchronous getters
+  // (Notification.permission) and navigator.permissions.query() also report
+  // "granted", and repeat visits don't re-request.
+  NotifyPermissionSet(*request_data, std::move(callback), /*persist=*/true,
+                      /*permission_result=*/nullptr,
+                      permissions::PermissionPromptDecision{
+                          .overall_decision = PermissionDecision::kAllow,
+                          .is_final = true});
 }
 
 void PermissionContextBase::PermissionDecided(

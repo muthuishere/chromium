@@ -7,14 +7,21 @@
 #import <Security/Security.h>
 
 #include <atomic>
+#include <memory>
 
 #include "base/apple/osstatus_logging.h"
 #include "base/apple/scoped_cftyperef.h"
 #include "base/base64.h"
+#include "base/base_paths.h"
 #include "base/containers/span.h"
+#include "base/environment.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
+#include "base/path_service.h"
 #include "base/rand_util.h"
+#include "base/strings/string_util.h"
 #include "base/strings/string_view_util.h"
 #include "base/types/expected.h"
 #include "build/branding_buildflags.h"
@@ -106,6 +113,49 @@ base::expected<std::string, OSStatus> GetPasswordImpl(
   return base::unexpected(password.error());
 }
 
+// AGENT BUILD: resolve the OSCrypt password from a file instead of the macOS
+// Keychain when one is present. This makes the browser never trigger a
+// "<App> Safe Storage" Keychain prompt (a locally-built, non-stably-signed
+// Chromium re-prompts forever because its Keychain ACL trust can't persist),
+// and it lets a profile copied from another browser (e.g. Google Chrome)
+// decrypt: seed the file with that browser's key and OSCrypt derives the same
+// AES key.
+//
+// File location (first that resolves): $CHROMIUM_AGENT_OSCRYPT_KEY_FILE, else
+// ~/.config/chromium-agent/oscrypt.key. Contents are the raw Safe Storage
+// password string, exactly what
+//   security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"
+// prints; trailing whitespace/newline is trimmed. Returns false (fall back to
+// the Keychain) if no readable, non-empty file exists.
+bool ReadAgentKeyFile(std::string* out) {
+  base::FilePath path;
+  std::unique_ptr<base::Environment> env = base::Environment::Create();
+  if (std::string env_path = env->GetVar("CHROMIUM_AGENT_OSCRYPT_KEY_FILE")
+                                 .value_or(std::string());
+      !env_path.empty()) {
+    path = base::FilePath(env_path);
+  } else {
+    base::FilePath home;
+    if (!base::PathService::Get(base::DIR_HOME, &home)) {
+      return false;
+    }
+    path = home.Append(".config").Append("chromium-agent").Append(
+        "oscrypt.key");
+  }
+
+  std::string contents;
+  if (!base::ReadFileToString(path, &contents)) {
+    return false;
+  }
+  std::string trimmed(
+      base::TrimWhitespaceASCII(contents, base::TRIM_TRAILING));
+  if (trimmed.empty()) {
+    return false;
+  }
+  *out = std::move(trimmed);
+  return true;
+}
+
 }  // namespace
 
 // static
@@ -126,6 +176,11 @@ KeychainPassword::KeychainPassword(KeychainV2& keychain)
 KeychainPassword::~KeychainPassword() = default;
 
 std::string KeychainPassword::GetPassword() const {
+  // AGENT BUILD: a file-provided key wins over the Keychain (see ReadAgentKeyFile).
+  if (std::string file_key; ReadAgentKeyFile(&file_key)) {
+    return file_key;
+  }
+
   auto password =
       GetPasswordImpl(*keychain_, GetServiceName(), GetAccountName());
 

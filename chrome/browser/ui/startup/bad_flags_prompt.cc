@@ -138,9 +138,10 @@ const char* const kBadFlags[] = {
     // if they are not.
     network::switches::kUnsafelyTreatInsecureOriginAsSecure,
 
-    // This flag allows sites to access the camera and microphone without
-    // getting the user's permission.
-    switches::kUseFakeUIForMediaStream,
+    // AGENT BUILD: kUseFakeUIForMediaStream is passed intentionally by the
+    // launcher (auto-grant mic/camera for automation + device testing), so it
+    // is omitted here to suppress the "unsupported command-line flag" warning
+    // infobar. See //CHROMIUM_SENDKEYS_SPEC.md.
 
     // This flag allows sites to access protected media identifiers without
     // getting the user's permission.

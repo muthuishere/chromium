@@ -118,6 +118,16 @@ class SendKeysWatcher {
 
   void WriteResultFile(const std::string& id, base::DictValue result);
 
+  // Tab / window management on the last-active browser window. NEWTAB/NEWWINDOW
+  // open |url| (blank if empty); CLOSETAB/SELECTTAB act on |index_str| (the
+  // active tab if empty/CLOSETAB); LISTTABS writes a results/<id>.json array of
+  // {index,title,url,active}.
+  void InjectNewTab(const std::string& url);
+  void InjectNewWindow(const std::string& url);
+  void InjectCloseTab(const std::string& index_str);
+  void InjectSelectTab(const std::string& index_str);
+  void InjectListTabs(const std::string& id);
+
   // Resolves the active tab's WebContents via
   // GetLastActiveBrowserWindowInterfaceWithAnyProfile(). May return nullptr.
   content::WebContents* GetTargetWebContents();

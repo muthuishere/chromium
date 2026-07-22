@@ -46,7 +46,9 @@ const path = require('path');
 function usageAndExit() {
   console.error(
     'usage: chromesendkeys.js --dir <spool> ' +
-      '<add|type|key|click|rightclick|goto|screenshot|send|push> [args...]',
+      '<add|type|key|click|rightclick|goto|screenshot|eval|getdom|http|' +
+      'waitfor|netlog|newtab|newwindow|closetab|selecttab|listtabs|send|push> ' +
+      '[args...]',
   );
   process.exit(1);
 }
@@ -191,6 +193,28 @@ function main() {
         (id) => `WAITFOR:${timeoutMsArg}|${id}|${js}`,
         Number(timeoutMsArg) + 5000,
       );
+      console.log(JSON.stringify(result));
+      break;
+    }
+    case 'newtab':
+      appendLine(dir, `NEWTAB:${args.join(' ')}`);
+      push(dir);
+      break;
+    case 'newwindow':
+      appendLine(dir, `NEWWINDOW:${args.join(' ')}`);
+      push(dir);
+      break;
+    case 'closetab':
+      // index optional; empty -> active tab
+      appendLine(dir, `CLOSETAB:${args[0] || ''}`);
+      push(dir);
+      break;
+    case 'selecttab':
+      appendLine(dir, `SELECTTAB:${args[0] || ''}`);
+      push(dir);
+      break;
+    case 'listtabs': {
+      const result = sendAndAwait(dir, (id) => `LISTTABS:${id}`);
       console.log(JSON.stringify(result));
       break;
     }

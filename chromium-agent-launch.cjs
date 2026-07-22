@@ -76,7 +76,23 @@ function main() {
   const passthrough = sep === -1 ? [] : argv.slice(sep + 1);
   const startUrl = head.find((a) => !a.startsWith('-'));
 
-  const args = [`--user-data-dir=${profileDir}`, ...passthrough];
+  // Keep the agent browser to a single, predictable window/tab: no first-run
+  // welcome tab, no default-browser prompt, no crash-restore bubble stealing
+  // foreground. Without these the official build opens an extra welcome tab
+  // that becomes the "active tab" the watcher targets instead of the page.
+  const args = [
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
+    // Audio testing: auto-grant mic/camera permission (no dialog) so
+    // enumerateDevices() exposes device labels and a tab can select a specific
+    // input (e.g. BlackHole) via getUserMedia({audio:{deviceId}}) and route
+    // output via HTMLMediaElement.setSinkId(deviceId). Real devices, faked UI.
+    '--use-fake-ui-for-media-stream',
+    ...passthrough,
+  ];
   if (startUrl) {
     args.push(startUrl);
   }
