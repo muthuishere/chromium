@@ -1073,21 +1073,20 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
   const base::CommandLine& command_line =
       *base::CommandLine::ForCurrentProcess();
 
-  // AGENT BUILD: web security (CORS + same-origin policy) is disabled
-  // unconditionally in the core so cross-origin requests are never blocked.
-  // This forces switches::kDisableWebSecurity on for every process regardless
-  // of --user-data-dir. It is done here in BasicStartupComplete() because this
-  // is the earliest callback and many places in Chromium gate security
-  // features on kDisableWebSecurity; setting it once here covers them all.
+  // AGENT BUILD: we intentionally do NOT force switches::kDisableWebSecurity
+  // anymore. That switch is forwarded to renderer processes and makes Blink
+  // disable its same-origin policy directly, which strips the Origin header on
+  // cross-origin requests and breaks auth flows that require it -- notably
+  // Microsoft/MSAL SPA token redemption (POST /oauth2/v2.0/token -> HTTP 400,
+  // the Teams/Office login loop).
   //
-  // The upstream guard that required a non-default --user-data-dir (and would
-  // otherwise strip the switch) is intentionally removed for this build, and
-  // this switch is deliberately not surfaced to the user (see
-  // chrome/browser/ui/startup/bad_flags_prompt.cc).
-  if (!command_line.HasSwitch(switches::kDisableWebSecurity)) {
-    base::CommandLine::ForCurrentProcess()->AppendSwitch(
-        switches::kDisableWebSecurity);
-  }
+  // Instead, the ONE thing the agent needs -- cross-origin reads succeeding --
+  // is achieved by turning off the network-service CORS response check
+  // directly on the URLLoaderFactory params (see
+  // content/browser/url_loader_factory_params_helper.cc and
+  // storage_partition_impl.cc). That relaxes only the network layer; Blink
+  // keeps SOP and still sends the Origin header, so OAuth/Teams work while
+  // cross-origin fetch/XHR still return the full body.
 
   // The DevTools remote debugging pipe file descriptors need to be checked
   // before any other files are opened, see https://crbug.com/40259890.

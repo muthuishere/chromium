@@ -334,9 +334,11 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 | `chrome/browser/sendkeys_watcher_unittest.cc` (new) | gtest for `ParseTrigger` (wired into `//chrome/test:unit_tests`) |
 | `.claude/skills/chromium-sendkeys/SKILL.md` (new)  | Operational runbook for build/launch/inject/verify/test      |
 | `CHROMIUM_SENDKEYS_SPEC.md` (new, this file)       | Design + protocol record                                    |
-| `chrome/app/chrome_main_delegate.cc`              | **Security relaxation:** force `--disable-web-security` on unconditionally (CORS off) — see below |
-| `chrome/browser/ui/startup/bad_flags_prompt.cc`   | **Security relaxation:** drop `kDisableWebSecurity` from the bad-flags list (no warning infobar) |
-| `chrome/browser/ui/webui/version/version_ui.cc`   | **Security relaxation:** hide `--disable-web-security` from the `chrome://version` command-line field |
+| `chrome/app/chrome_main_delegate.cc`              | **CORS:** intentionally does NOT force `--disable-web-security` (that flag strips the Origin header and breaks OAuth/Teams) — see below |
+| `services/network/cors/cors_url_loader.cc`        | **CORS:** response-side CORS access check made permissive (never blocks); Origin header still attached |
+| `services/network/cors/preflight_controller.cc`  | **CORS:** preflight (`OPTIONS`) always accepted, so cross-origin non-simple requests work |
+| `chrome/browser/ui/startup/bad_flags_prompt.cc`   | (legacy, now inert) formerly hid the `kDisableWebSecurity` warning; switch is no longer forced |
+| `chrome/browser/ui/webui/version/version_ui.cc`   | (legacy, now inert) formerly hid `--disable-web-security` from `chrome://version` |
 | `services/network/public/cpp/parsed_headers.cc`   | **Security relaxation:** skip parsing `Content-Security-Policy` response headers (header CSP not enforced) |
 | `components/permissions/permission_context_base.cc` | **Security relaxation:** `DecidePermission()` auto-grants every permission (no prompt) — see below |
 | `components/os_crypt/common/keychain_password_mac.mm` | **Keychain-free profile:** `GetPassword()` reads the OSCrypt key from a file (`$CHROMIUM_AGENT_OSCRYPT_KEY_FILE` / `~/.config/chromium-agent/oscrypt.key`) before falling back to the macOS Keychain — no prompt, and decrypts a profile copied from another browser when seeded with its key |
@@ -352,42 +354,48 @@ is intentionally not surfaced in the UI. This is a security downgrade by
 design; do not point this build at untrusted sites while logged into anything
 you care about.
 
-### 1. CORS / same-origin policy — OFF
+### 1. CORS — OFF, but WITHOUT stripping the Origin header
 
-Chromium already has a `--disable-web-security` switch that bypasses CORS and
-the same-origin policy (it is plumbed into the network service via
-`network::mojom::URLLoaderFactoryParams::disable_web_security` and into Blink
-via the `web_security_enabled` web-preference — a single switch that ~10 read
-sites in `content/`, `services/network/`, and Blink all key off).
+**Do not use `--disable-web-security` for this.** That switch is forwarded to
+the renderer, where Blink disables its same-origin policy and consequently
+**omits the `Origin` request header** on cross-origin requests. Many auth flows
+require that header — notably **Microsoft/MSAL SPA token redemption**, where a
+missing/`null` Origin makes Azure AD reject `POST /oauth2/v2.0/token` with HTTP
+`400` in a retry loop (the Teams/Office login breaks). The switch also bypasses
+the CORS URL loader entirely, and that loader is exactly what *attaches* the
+Origin header — so `disable_web_security` couples "allow cross-origin reads"
+and "drop Origin" into one flag. (Empirically confirmed: with the switch, a
+cross-origin XHR returned the body but sent `Origin: (none)`.)
 
-Rather than depend on the launcher passing the flag, we force it on in the
-core at the earliest per-process callback:
+Instead we keep the **normal CORS loader path** (so the Origin header is
+attached like stock Chromium) and only make the CORS **checks permissive**:
 
-- **`chrome/app/chrome_main_delegate.cc`** — `BasicStartupComplete()`. Upstream
-  code here *stripped* `kDisableWebSecurity` unless a **non-default**
-  `--user-data-dir` was also given. We replaced that guard with an
-  unconditional `AppendSwitch(switches::kDisableWebSecurity)` (idempotent —
-  only appends if not already present). Because `BasicStartupComplete()` runs
-  in **every** process (browser + renderer + utility/network + gpu), all of
-  them see the switch. The browser-process copy is what matters for CORS,
-  since factory params are built browser-side and sent to the network service
-  over mojo.
+- **`chrome/app/chrome_main_delegate.cc`** — `BasicStartupComplete()`
+  intentionally does **not** append `switches::kDisableWebSecurity`. Web
+  security / Blink SOP stay on; the browser is stock and undetectable, and the
+  Origin header is sent normally.
+- **`services/network/cors/cors_url_loader.cc`** — in `OnReceiveResponse()` and
+  the redirect handler, a failed `CheckAccess()` (missing/mismatched
+  `Access-Control-Allow-Origin`) no longer fails the load. `response_tainting_`
+  stays `kCors`, so the cross-origin body is readable by the agent. Requests
+  that would pass CORS anyway (e.g. Teams' own calls) are unaffected.
+- **`services/network/cors/preflight_controller.cc`** — `CheckPreflightAccess()`
+  returns success for every preflight response, and the post-preflight
+  `CheckPreflightResult` error is cleared, so cross-origin requests with
+  non-simple methods/custom headers (which trigger an `OPTIONS` preflight)
+  succeed even against servers that send no/invalid preflight CORS headers.
 
-Because the switch is now injected in-code, it is deliberately hidden from the
-two places a user would otherwise "read" it:
+Net effect: **the agent gets full cross-origin reads, the Origin header is
+preserved, and OAuth/Teams work.** `bad_flags_prompt.cc` / `version_ui.cc`
+(which formerly hid the forced switch) are now inert — the switch is not forced.
 
-- **`chrome/browser/ui/startup/bad_flags_prompt.cc`** — removed
-  `switches::kDisableWebSecurity` from the `kBadFlags` list, so the "You are
-  using an unsupported command-line flag… stability and security will suffer"
-  infobar never appears.
-- **`chrome/browser/ui/webui/version/version_ui.cc`** — filtered the
-  `--disable-web-security` token out of the `chrome://version` **Command Line**
-  field (both the Windows `GetCommandLineString()` path and the POSIX `argv`
-  loop).
-
-**Verified:** cross-origin `XMLHttpRequest` (which returns `null` under CORS)
-returns the real body from `example.com → example.org`, `google.com →
-example.com` (200, 559 bytes), and a `data:`/`accounts.google.com` origin →
+**Verified (throwaway profile, 2026-07-22):** from `https://github.com`, a
+cross-origin POST sends `Origin: https://github.com` (real origin, `200`); a
+simple cross-origin GET returns `200`; a preflighted cross-origin POST (custom
+header) returns `200`; same-origin is unchanged. Earlier runs confirmed
+cross-origin `XMLHttpRequest` returns the real body from `example.com →
+example.org`, `google.com → example.com`, and a `data:`/`accounts.google.com`
+origin →
 `example.com`.
 
 ### 2. Content-Security-Policy (header) — NOT ENFORCED

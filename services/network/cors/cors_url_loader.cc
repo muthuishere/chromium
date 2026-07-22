@@ -617,24 +617,21 @@ void CorsURLLoader::OnReceiveResponse(
   DCHECK(forwarding_client_);
   DCHECK(!deferred_redirect_url_);
 
-  // See 10.7.4 of https://fetch.spec.whatwg.org/#http-network-or-cache-fetch
-  const bool is_304_for_revalidation =
-      request_.is_revalidating && response_head->headers &&
-      response_head->headers->response_code() == 304;
-  if (fetch_cors_flag_ && !is_304_for_revalidation) {
-    const auto result = CheckAccess(
-        request_.url,
-        GetHeaderString(*response_head,
-                        header_names::kAccessControlAllowOrigin),
-        GetHeaderString(*response_head,
-                        header_names::kAccessControlAllowCredentials),
-        request_.credentials_mode,
-        tainted_ ? url::Origin() : *request_.request_initiator);
-    if (!result.has_value()) {
-      HandleComplete(URLLoaderCompletionStatus(result.error()));
-      return;
-    }
-  }
+  // AGENT BUILD: the response-side CORS access check is intentionally NOT
+  // allowed to fail the load. The request still went out through this CORS
+  // loader WITH its Origin header attached (unlike --disable-web-security,
+  // which bypasses this loader entirely and strips Origin -- that breaks
+  // OAuth/SPA token redemption, e.g. Microsoft/MSAL: a missing Origin makes
+  // Azure AD 400 the Teams/Office login in a loop). Here we drop only the
+  // enforcement of a missing/mismatched Access-Control-Allow-Origin, so the
+  // agent can read cross-origin bodies. response_tainting_ was already set to
+  // kCors for cors-mode requests, so the body stays readable. Requests that
+  // WOULD pass CORS (e.g. Teams' own calls to a properly-configured endpoint)
+  // are unaffected -- this only stops failures from blocking.
+  //
+  // Upstream behavior for reference:
+  //   const auto result = CheckAccess(...);
+  //   if (!result.has_value()) { HandleComplete(...); return; }
 
   if (request_.destination ==
       mojom::RequestDestination::kSharedStorageWorklet) {
@@ -742,22 +739,11 @@ void CorsURLLoader::OnReceiveRedirect(const net::RedirectInfo& redirect_info,
     }
   }
 
-  // If `CORS flag` is set and a CORS check for `request` and `response` returns
-  // failure, then return a network error.
-  if (fetch_cors_flag_ && IsCorsEnabledRequestMode(request_.mode)) {
-    const auto result = CheckAccess(
-        request_.url,
-        GetHeaderString(*response_head,
-                        header_names::kAccessControlAllowOrigin),
-        GetHeaderString(*response_head,
-                        header_names::kAccessControlAllowCredentials),
-        request_.credentials_mode,
-        tainted_ ? url::Origin() : *request_.request_initiator);
-    if (!result.has_value()) {
-      HandleComplete(URLLoaderCompletionStatus(result.error()));
-      return;
-    }
-  }
+  // AGENT BUILD: as in OnReceiveResponse, the redirect-time CORS access check
+  // is intentionally not allowed to fail the load. The Origin header is still
+  // attached (this loader path is used), only the allow-origin enforcement is
+  // dropped so the agent can follow cross-origin redirects. Upstream would
+  // CheckAccess() here and return a network error on failure.
 
   timing_allow_failed_flag_ = !PassesTimingAllowOriginCheck(*response_head);
   last_response_url_ = redirect_info.new_url;

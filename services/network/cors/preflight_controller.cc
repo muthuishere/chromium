@@ -234,42 +234,15 @@ base::expected<void, CorsErrorStatus> CheckPreflightAccess(
     const std::optional<std::string>& allow_credentials_header,
     mojom::CredentialsMode actual_credentials_mode,
     const url::Origin& origin) {
-  // Step 7 of https://fetch.spec.whatwg.org/#cors-preflight-fetch
-  auto cors_result =
-      CheckAccess(response_url, allow_origin_header, allow_credentials_header,
-                  actual_credentials_mode, origin);
-  const bool has_ok_status = IsSuccessfulStatus(response_status_code);
-
-  if (cors_result.has_value()) {
-    if (has_ok_status) {
-      return base::ok();
-    }
-    return base::unexpected(
-        CorsErrorStatus(mojom::CorsError::kPreflightInvalidStatus));
-  }
-
-  // Prefer using a preflight specific error code.
-  const auto map_to_preflight_error_codes = [](mojom::CorsError error) {
-    switch (error) {
-      case mojom::CorsError::kWildcardOriginNotAllowed:
-        return mojom::CorsError::kPreflightWildcardOriginNotAllowed;
-      case mojom::CorsError::kMissingAllowOriginHeader:
-        return mojom::CorsError::kPreflightMissingAllowOriginHeader;
-      case mojom::CorsError::kMultipleAllowOriginValues:
-        return mojom::CorsError::kPreflightMultipleAllowOriginValues;
-      case mojom::CorsError::kInvalidAllowOriginValue:
-        return mojom::CorsError::kPreflightInvalidAllowOriginValue;
-      case mojom::CorsError::kAllowOriginMismatch:
-        return mojom::CorsError::kPreflightAllowOriginMismatch;
-      case mojom::CorsError::kInvalidAllowCredentials:
-        return mojom::CorsError::kPreflightInvalidAllowCredentials;
-      default:
-        NOTREACHED();
-    }
-  };
-  cors_result.error().cors_error =
-      map_to_preflight_error_codes(cors_result.error().cors_error);
-  return cors_result;
+  // AGENT BUILD: accept every preflight response. Combined with the cleared
+  // CheckPreflightResult and the permissive response check in
+  // cors_url_loader.cc, this lets the agent make cross-origin requests with
+  // non-simple methods/headers even when the server returns no/invalid CORS
+  // preflight headers. The preflight OPTIONS still goes out normally with the
+  // Origin header, so nothing about auth/OAuth flows changes; requests whose
+  // preflight would pass anyway (e.g. Teams/Office) are unaffected. (Upstream
+  // ran CheckAccess() on the OPTIONS response here and failed on mismatch.)
+  return base::ok();
 }
 
 
@@ -455,6 +428,15 @@ class PreflightController::PreflightLoader final {
     detected_error_status = CheckPreflightResult(
         *result, original_request_, non_wildcard_request_headers_support_,
         acam_preflight_spec_conformant_);
+
+    // AGENT BUILD: do not let a preflight method/header mismatch block the
+    // request. This matches the fork's permissive CORS response check (see
+    // services/network/cors/cors_url_loader.cc) so the agent can make
+    // cross-origin requests with non-simple methods/headers. Requests whose
+    // preflight WOULD pass (e.g. Teams/Office calling a properly-configured
+    // endpoint) are unaffected -- this only clears failures. The Origin header
+    // is still sent normally, so OAuth/SPA flows keep working.
+    detected_error_status = std::nullopt;
 
     net::Error net_error =
         detected_error_status.has_value() ? net::ERR_FAILED : net::OK;
