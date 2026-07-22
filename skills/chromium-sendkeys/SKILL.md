@@ -124,13 +124,18 @@ and drop `--dir` from every call.
 ## 3a. Audio & video in / out — raw media over WebSocket (no virtual driver)
 
 Design decision: audio AND video are streamed as **raw frames over local WebSockets**, NOT
-through a virtual audio/camera driver (no BlackHole, no OBS virtual-cam). The WS server is
-**OFF by default** — no standing/always-allowed socket. You **explicitly start it on a port**,
-attach the streams you want, then stop it. Bound **127.0.0.1 only** (expose via a cloudflared
-tunnel if you ever need it remote — never bind 0.0.0.0 in the browser). Four endpoints:
+through a virtual audio/camera driver (no BlackHole, no OBS virtual-cam). Each stream is its own
+**WebSocket-backed virtual device** — a "driver" implemented as a WebSocket, replacing what a
+kernel/OS audio or camera driver would do. **TWO independent servers** — audio and video —
+each **OFF by default**, each **started on its own port** and **stopped independently** (run
+audio-only, video-only, or both). Each server is **two-way**. Bound **127.0.0.1 only** (expose
+via a cloudflared tunnel if ever needed — never bind 0.0.0.0).
 
+Audio server (`audio start <port>`):
 - `ws://127.0.0.1:<port>/mic`  — **you send** PCM in → becomes the tab's microphone.
 - `ws://127.0.0.1:<port>/tap`  — **you receive** the tab's audio output PCM out.
+
+Video server (`video start <port>`, its own port):
 - `ws://127.0.0.1:<port>/cam`  — **you send** frames in → becomes the tab's camera.
 - `ws://127.0.0.1:<port>/vtap` — **you receive** the tab's rendered video frames out.
 
@@ -142,7 +147,8 @@ SEND (`/mic`, `/cam`) is a browser-global fake device — whichever tab calls ge
 consumes it, so use `selecttab` to control which tab captures. You can't feed two tabs
 different streams from one source.
 
-**Watcher commands** (start server → arm streams → stop; media bytes flow over the WS, not the spool):
+**Watcher commands** (start each server on its own port → arm streams → stop; media bytes flow
+over the WS, not the spool):
 
 ```bash
 # File shortcuts — work TODAY via built-in fake-device flags, no rebuild:
@@ -151,22 +157,26 @@ different streams from one source.
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playwav   /abs/a.wav
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playvideo /abs/v.y4m   # Y4M (or MJPEG)
 
-# Live raw streaming (ships with the media-bridge build):
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio start 8778  # boot WS server on :8778 (localhost)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on      # attach ws /mic   (send audio)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on      # attach ws /tap   (recv audio)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys camstream on      # attach ws /cam   (send video)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys vtap      on      # attach ws /vtap  (recv video)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio stop        # shut the server + all streams down
+# Live raw streaming (ships with the media-bridge build) — two independent servers:
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio start 8778  # boot AUDIO server on :8778
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on      #   attach /mic   (send audio)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on      #   attach /tap   (recv audio)
+
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys video start 8779  # boot VIDEO server on :8779
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys camstream on      #   attach /cam   (send video)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys vtap      on      #   attach /vtap  (recv video)
+
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio stop        # stop AUDIO server (video keeps running)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys video stop        # stop VIDEO server
 ```
 
 > STATUS: `playwav`/`playvideo` (file injection) work via the built-in fake-device flags.
-> `micstream`/`tapaudio`/`camstream`/`vtap` (the live WebSocket bridge) are implemented by the
-> in-fork media bridge — build with "build the audio websocket bridge". Backed by Chromium's own
-> `media/audio/fake_audio_input_stream.cc` + `media/capture/video/file_video_capture_device.cc`
-> (send), and `content/browser/media/audio_loopback_stream_broker.cc` + `CopyFromSurface`
-> (receive) — no external driver. Video gotcha: frames must be valid I420/Y4M at a supported
-> size or nothing renders.
+> The live WebSocket servers (`audio start`/`video start` + `micstream`/`tapaudio`/`camstream`/`vtap`)
+> are implemented by the in-fork media bridge — build with "build the audio websocket bridge".
+> Backed by Chromium's own `media/audio/fake_audio_input_stream.cc` +
+> `media/capture/video/file_video_capture_device.cc` (send), and
+> `content/browser/media/audio_loopback_stream_broker.cc` + `CopyFromSurface` (receive) — no
+> external driver. Video gotcha: frames must be valid I420/Y4M at a supported size or nothing renders.
 
 Raw protocol (bypassing the CLI, e.g. from another language): stage lines
 into a file, then atomically publish — never write directly into the spool
