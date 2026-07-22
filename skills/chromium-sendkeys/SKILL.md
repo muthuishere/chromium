@@ -121,42 +121,52 @@ node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys netlog stop /tmp/netlog.js
 Or set `--dir` once via `export CHROMIUM_SENDKEYS_DIR=~/chrome-agent-sendkeys`
 and drop `--dir` from every call.
 
-## 3a. Audio in / out — raw PCM over WebSocket (no virtual driver)
+## 3a. Audio & video in / out — raw media over WebSocket (no virtual driver)
 
-Design decision: audio is streamed as **raw PCM over local WebSockets**, NOT through a
-virtual audio driver (no BlackHole). The WS server is **OFF by default** — there is no
-standing/always-allowed socket. You **explicitly start it on a port** when you need audio,
-then attach `mic`/`tap`, then stop it. Bound **127.0.0.1 only** (expose via a cloudflared
-tunnel if you ever need it remote — never bind 0.0.0.0 in the browser). Two endpoints:
+Design decision: audio AND video are streamed as **raw frames over local WebSockets**, NOT
+through a virtual audio/camera driver (no BlackHole, no OBS virtual-cam). The WS server is
+**OFF by default** — no standing/always-allowed socket. You **explicitly start it on a port**,
+attach the streams you want, then stop it. Bound **127.0.0.1 only** (expose via a cloudflared
+tunnel if you ever need it remote — never bind 0.0.0.0 in the browser). Four endpoints:
 
-- `ws://127.0.0.1:<port>/mic` — **you send** PCM in → becomes the tab's microphone.
-- `ws://127.0.0.1:<port>/tap` — **you receive** the tab's audio output PCM out.
+- `ws://127.0.0.1:<port>/mic`  — **you send** PCM in → becomes the tab's microphone.
+- `ws://127.0.0.1:<port>/tap`  — **you receive** the tab's audio output PCM out.
+- `ws://127.0.0.1:<port>/cam`  — **you send** frames in → becomes the tab's camera.
+- `ws://127.0.0.1:<port>/vtap` — **you receive** the tab's rendered video frames out.
 
-Format: interleaved **int16, 48 kHz stereo** (first WS text frame may override:
-`{"rate":48000,"channels":2}`).
+Formats: audio = interleaved **int16, 48 kHz stereo**; video = raw **I420** (size+fps in a JSON
+handshake frame, e.g. `{"width":1280,"height":720,"fps":30,"format":"I420"}`).
 
-**Watcher commands** (start server → arm endpoints → stop; audio bytes flow over the WS,
-not the spool):
+**Per-tab?** RECEIVE (`/tap`, `/vtap`) is per-tab (bound to the active/selected WebContents).
+SEND (`/mic`, `/cam`) is a browser-global fake device — whichever tab calls getUserMedia
+consumes it, so use `selecttab` to control which tab captures. You can't feed two tabs
+different streams from one source.
+
+**Watcher commands** (start server → arm streams → stop; media bytes flow over the WS, not the spool):
 
 ```bash
-# SEND a WAV as the tab mic (this one works TODAY via flags, no rebuild:
-#   --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=/abs/file.wav ):
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playwav /abs/path.wav
+# File shortcuts — work TODAY via built-in fake-device flags, no rebuild:
+#   mic:  --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=/abs/a.wav
+#   cam:  --use-fake-device-for-media-stream --use-file-for-fake-video-capture=/abs/v.y4m
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playwav   /abs/a.wav
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playvideo /abs/v.y4m   # Y4M (or MJPEG)
 
-# Live raw-PCM streaming (ships with the audio-bridge build):
+# Live raw streaming (ships with the media-bridge build):
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio start 8778  # boot WS server on :8778 (localhost)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on      # attach ws /mic  (send)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on      # attach ws /tap  (receive)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream off
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  off
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio stop        # shut the server down
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on      # attach ws /mic   (send audio)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on      # attach ws /tap   (recv audio)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys camstream on      # attach ws /cam   (send video)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys vtap      on      # attach ws /vtap  (recv video)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio stop        # shut the server + all streams down
 ```
 
-> STATUS: `playwav` (WAV-file mic injection) is available via the built-in fake-audio flags.
-> `micstream`/`tapaudio` (the live WebSocket bridge) are implemented by the in-fork audio bridge
-> — build with "build the audio websocket bridge". Backed by Chromium's own
-> `media/audio/fake_audio_input_stream.cc` (send) and
-> `content/browser/media/audio_loopback_stream_broker.cc` (receive) — no external driver.
+> STATUS: `playwav`/`playvideo` (file injection) work via the built-in fake-device flags.
+> `micstream`/`tapaudio`/`camstream`/`vtap` (the live WebSocket bridge) are implemented by the
+> in-fork media bridge — build with "build the audio websocket bridge". Backed by Chromium's own
+> `media/audio/fake_audio_input_stream.cc` + `media/capture/video/file_video_capture_device.cc`
+> (send), and `content/browser/media/audio_loopback_stream_broker.cc` + `CopyFromSurface`
+> (receive) — no external driver. Video gotcha: frames must be valid I420/Y4M at a supported
+> size or nothing renders.
 
 Raw protocol (bypassing the CLI, e.g. from another language): stage lines
 into a file, then atomically publish — never write directly into the spool
