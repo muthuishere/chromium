@@ -239,20 +239,33 @@ node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys screenshot /tmp/verify.png
 
 ## Security relaxations baked in (agent build)
 
-This build ships with two browser protections **disabled in the core** (no
-flag needed, and not shown in the UI or `chrome://version`):
+This build relaxes several browser protections **in the core** (no flag needed):
 
-- **CORS / same-origin policy is OFF** — cross-origin `fetch`/XHR from any page
-  returns the real body. (`chrome/app/chrome_main_delegate.cc` forces
-  `--disable-web-security` on unconditionally.)
-- **Header Content-Security-Policy is NOT enforced** — pages like LinkedIn that
-  send a `connect-src` CSP header no longer block cross-origin requests.
-  (`services/network/public/cpp/parsed_headers.cc` skips CSP-header parsing.)
+- **CORS is OFF, but the Origin header is PRESERVED.** Cross-origin `fetch`/XHR
+  from any page returns the real body (simple *and* preflighted/custom-header
+  requests). We do **not** use `--disable-web-security` — that strips the Origin
+  header and breaks OAuth (Teams/MSAL 400-loops). Instead Blink's same-origin
+  policy stays on (Origin sent normally) and only the network CORS *checks* are
+  made permissive: `services/network/cors/cors_url_loader.cc` (response check)
+  and `services/network/cors/preflight_controller.cc` (preflight).
+  `chrome/app/chrome_main_delegate.cc` intentionally does NOT force the switch.
+- **Header Content-Security-Policy is NOT enforced** —
+  `services/network/public/cpp/parsed_headers.cc` skips CSP-header parsing.
   *Meta-tag CSP is still enforced by Blink — not covered.*
+- **All permission prompts auto-grant** — geolocation, notifications, camera,
+  mic, clipboard, etc. never prompt
+  (`components/permissions/permission_context_base.cc`).
+- **Keychain-free profile (macOS)** — the OSCrypt key is read from a file
+  (`$CHROMIUM_AGENT_OSCRYPT_KEY_FILE` / `~/.config/chromium-agent/oscrypt.key`)
+  before the Keychain, so no "Safe Storage" prompt; seed it with another
+  browser's key to decrypt a copied profile
+  (`components/os_crypt/common/keychain_password_mac.mm`).
 
-See `//CHROMIUM_SENDKEYS_SPEC.md` → "Security relaxations" for the full
-rationale, the exact files, and verification. Treat this as an insecure browser:
-don't point it at untrusted sites while logged into anything sensitive.
+Because CORS-off keeps the Origin header and SOP intact, auth flows like
+**Microsoft Teams/Office** log in normally. See `//CHROMIUM_SENDKEYS_SPEC.md` →
+"Security relaxations" for full rationale, exact files, and verification. Still
+an insecure browser — don't point it at untrusted sites while logged into
+anything sensitive.
 
 ## Known limitations to keep in mind while testing
 
