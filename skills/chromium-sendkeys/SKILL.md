@@ -121,6 +121,38 @@ node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys netlog stop /tmp/netlog.js
 Or set `--dir` once via `export CHROMIUM_SENDKEYS_DIR=~/chrome-agent-sendkeys`
 and drop `--dir` from every call.
 
+## 3a. Audio in / out — raw PCM over WebSocket (no virtual driver)
+
+Design decision: audio is streamed as **raw PCM over local WebSockets**, NOT through a
+virtual audio driver (no BlackHole). Two endpoints, bound **127.0.0.1 only** (expose via a
+cloudflared tunnel if you ever need it remote — never bind 0.0.0.0 in the browser):
+
+- `ws://127.0.0.1:<port>/mic` — **you send** PCM in → becomes the tab's microphone.
+- `ws://127.0.0.1:<port>/tap` — **you receive** the tab's audio output PCM out.
+
+Format: interleaved **int16, 48 kHz stereo** (first WS text frame may override:
+`{"rate":48000,"channels":2}`). Port via `CHROMIUM_AUDIO_WS_PORT` (default 8778).
+
+**Watcher commands** (arm/disarm; the audio bytes flow over the WS, not the spool):
+
+```bash
+# SEND a WAV as the tab mic (this one works TODAY via flags, no rebuild:
+#   --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=/abs/file.wav ):
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playwav /abs/path.wav
+
+# Live raw-PCM streaming (ships with the audio-bridge build):
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on    # open ws /mic  (send)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on    # open ws /tap  (receive)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream off
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  off
+```
+
+> STATUS: `playwav` (WAV-file mic injection) is available via the built-in fake-audio flags.
+> `micstream`/`tapaudio` (the live WebSocket bridge) are implemented by the in-fork audio bridge
+> — build with "build the audio websocket bridge". Backed by Chromium's own
+> `media/audio/fake_audio_input_stream.cc` (send) and
+> `content/browser/media/audio_loopback_stream_broker.cc` (receive) — no external driver.
+
 Raw protocol (bypassing the CLI, e.g. from another language): stage lines
 into a file, then atomically publish — never write directly into the spool
 directory:
