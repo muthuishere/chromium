@@ -124,16 +124,19 @@ and drop `--dir` from every call.
 ## 3a. Audio in / out — raw PCM over WebSocket (no virtual driver)
 
 Design decision: audio is streamed as **raw PCM over local WebSockets**, NOT through a
-virtual audio driver (no BlackHole). Two endpoints, bound **127.0.0.1 only** (expose via a
-cloudflared tunnel if you ever need it remote — never bind 0.0.0.0 in the browser):
+virtual audio driver (no BlackHole). The WS server is **OFF by default** — there is no
+standing/always-allowed socket. You **explicitly start it on a port** when you need audio,
+then attach `mic`/`tap`, then stop it. Bound **127.0.0.1 only** (expose via a cloudflared
+tunnel if you ever need it remote — never bind 0.0.0.0 in the browser). Two endpoints:
 
 - `ws://127.0.0.1:<port>/mic` — **you send** PCM in → becomes the tab's microphone.
 - `ws://127.0.0.1:<port>/tap` — **you receive** the tab's audio output PCM out.
 
 Format: interleaved **int16, 48 kHz stereo** (first WS text frame may override:
-`{"rate":48000,"channels":2}`). Port via `CHROMIUM_AUDIO_WS_PORT` (default 8778).
+`{"rate":48000,"channels":2}`).
 
-**Watcher commands** (arm/disarm; the audio bytes flow over the WS, not the spool):
+**Watcher commands** (start server → arm endpoints → stop; audio bytes flow over the WS,
+not the spool):
 
 ```bash
 # SEND a WAV as the tab mic (this one works TODAY via flags, no rebuild:
@@ -141,10 +144,12 @@ Format: interleaved **int16, 48 kHz stereo** (first WS text frame may override:
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playwav /abs/path.wav
 
 # Live raw-PCM streaming (ships with the audio-bridge build):
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on    # open ws /mic  (send)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on    # open ws /tap  (receive)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio start 8778  # boot WS server on :8778 (localhost)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on      # attach ws /mic  (send)
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on      # attach ws /tap  (receive)
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream off
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  off
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio stop        # shut the server down
 ```
 
 > STATUS: `playwav` (WAV-file mic injection) is available via the built-in fake-audio flags.
