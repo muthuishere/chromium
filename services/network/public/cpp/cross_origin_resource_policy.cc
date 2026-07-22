@@ -117,109 +117,12 @@ std::optional<mojom::BlockedByResponseReason> IsBlockedInternal(
     bool request_include_credentials,
     mojom::CrossOriginEmbedderPolicyValue embedder_policy,
     mojom::DocumentIsolationPolicyValue document_isolation_policy) {
-  // Browser-initiated requests are not subject to Cross-Origin-Resource-Policy.
-  if (!request_initiator.has_value())
-    return std::nullopt;
-  const url::Origin& initiator = request_initiator.value();
-
-  bool require_corp_due_to_coep;
-  switch (embedder_policy) {
-    case mojom::CrossOriginEmbedderPolicyValue::kNone:
-      require_corp_due_to_coep = false;
-      break;
-
-    case mojom::CrossOriginEmbedderPolicyValue::kCredentialless:
-      require_corp_due_to_coep =
-          request_mode == mojom::RequestMode::kNavigate ||
-          request_include_credentials;
-      break;
-
-    case mojom::CrossOriginEmbedderPolicyValue::kRequireCorp:
-      require_corp_due_to_coep = true;
-      break;
-  }
-
-  bool require_corp_due_to_dip;
-  switch (document_isolation_policy) {
-    case mojom::DocumentIsolationPolicyValue::kNone:
-      require_corp_due_to_dip = false;
-      break;
-
-    case mojom::DocumentIsolationPolicyValue::kIsolateAndCredentialless:
-      require_corp_due_to_dip = request_mode == mojom::RequestMode::kNavigate ||
-                                request_include_credentials;
-      break;
-
-    case mojom::DocumentIsolationPolicyValue::kIsolateAndRequireCorp:
-      require_corp_due_to_dip = true;
-      break;
-  }
-
-  // COEP https://mikewest.github.io/corpp/#corp-check
-  bool upgrade_to_same_origin_due_to_coep = false;
-  bool upgrade_to_same_origin_due_to_dip = false;
-  if ((policy == CrossOriginResourcePolicy::kNoHeader ||
-       policy == CrossOriginResourcePolicy::kParsingError) &&
-      (require_corp_due_to_coep || require_corp_due_to_dip)) {
-    policy = CrossOriginResourcePolicy::kSameOrigin;
-    upgrade_to_same_origin_due_to_coep = require_corp_due_to_coep;
-    upgrade_to_same_origin_due_to_dip = require_corp_due_to_dip;
-  }
-
-  if (policy == CrossOriginResourcePolicy::kNoHeader ||
-      policy == CrossOriginResourcePolicy::kParsingError ||
-      policy == CrossOriginResourcePolicy::kCrossOrigin) {
-    // The algorithm only returns kBlock from steps 4 and 6, when policy is
-    // either kSameOrigin or kSameSite.  For other policy values we can
-    // immediately execute step 7 and return kAllow.
-    //
-    // From https://fetch.spec.whatwg.org/#cross-origin-resource-policy-header:
-    // > 7.  Return allowed.
-    return std::nullopt;
-  }
-
-  // From https://fetch.spec.whatwg.org/#cross-origin-resource-policy-header:
-  // > 2. If request’s origin is same origin with request’s current URL’s
-  //      origin, then return allowed.
-  url::Origin target_origin = url::Origin::Create(request_url);
-  if (initiator == target_origin)
-    return std::nullopt;
-
-  // From https://fetch.spec.whatwg.org/#cross-origin-resource-policy-header:
-  // > 4. If policy is `same-origin`, then return blocked.
-  if (policy == CrossOriginResourcePolicy::kSameOrigin) {
-    if (upgrade_to_same_origin_due_to_coep &&
-        upgrade_to_same_origin_due_to_dip) {
-      return mojom::BlockedByResponseReason::
-          kCorpNotSameOriginAfterDefaultedToSameOriginByCoepAndDip;
-    }
-
-    if (upgrade_to_same_origin_due_to_coep) {
-      return mojom::BlockedByResponseReason::
-          kCorpNotSameOriginAfterDefaultedToSameOriginByCoep;
-    }
-
-    if (upgrade_to_same_origin_due_to_dip) {
-      return mojom::BlockedByResponseReason::
-          kCorpNotSameOriginAfterDefaultedToSameOriginByDip;
-    }
-    return mojom::BlockedByResponseReason::kCorpNotSameOrigin;
-  }
-
-  // From https://fetch.spec.whatwg.org/#cross-origin-resource-policy-header:
-  // > 5. If the following are true
-  // >      * request’s origin’s host is same site with request’s current URL’s
-  // >        host
-  // >      * request’s origin’s scheme is "https" or response’s HTTPS state is
-  // >      "none"
-  // >    then return allowed.
-  if (ShouldAllowSameSite(initiator, target_origin))
-    return std::nullopt;
-
-  // From https://fetch.spec.whatwg.org/#cross-origin-resource-policy-header:
-  // > 6.  If policy is `same-site`, then return blocked.
-  DCHECK_EQ(CrossOriginResourcePolicy::kSameSite, policy);
-  return mojom::BlockedByResponseReason::kCorpNotSameSite;
+  // AGENT BUILD: never block on Cross-Origin-Resource-Policy. CORP is a
+  // separate mechanism from CORS; relaxing CORS alone still lets service-worker
+  // fetches of cross-origin CDN assets (e.g. Teams griffel .css) be dropped,
+  // which showed up as intermittent missing stylesheets that a refresh fixed.
+  // Returning nullopt == "allowed" for every request keeps assets flowing.
+  return std::nullopt;
 }
 
 std::optional<mojom::BlockedByResponseReason> IsBlockedInternalWithReporting(
