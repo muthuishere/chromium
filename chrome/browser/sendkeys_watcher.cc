@@ -401,7 +401,7 @@ constexpr net::NetworkTrafficAnnotationTag kAudioBridgeTrafficAnnotation =
           data: "Raw int16 PCM audio samples supplied by the local agent."
           destination: LOCAL
           internal {
-            contacts { email: "muthuishere@gmail.com" }
+            contacts { email: "agent-build@example.com" }
           }
           last_reviewed: "2026-07-23"
           user_data { type: NONE }
