@@ -495,9 +495,14 @@ AudioInputStream* AudioManagerBase::MakeAudioInputStream(
   }
 
   // If audio has been disabled force usage of a fake audio stream.
+  // AGENT BUILD: kUseFakeAudioInputOnly does the same for the microphone alone
+  // (leaving the real camera intact), so the raw-PCM mic bridge can back
+  // getUserMedia()'s mic without --use-fake-device-for-media-stream.
   auto params = input_params;
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kDisableAudioInput)) {
+          switches::kDisableAudioInput) ||
+      base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kUseFakeAudioInputOnly)) {
     params.set_format(AudioParameters::AUDIO_FAKE);
   }
 

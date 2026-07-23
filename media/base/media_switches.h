@@ -71,6 +71,11 @@ MEDIA_EXPORT extern const char kReportVp9AsAnUnsupportedMimeType[];
 MEDIA_EXPORT extern const char
     kUnsafelyAllowProtectedMediaIdentifierForDomain[];
 MEDIA_EXPORT extern const char kUseFakeDeviceForMediaStream[];
+// AGENT BUILD: fake ONLY the audio input device (the microphone), leaving the
+// real camera untouched -- unlike kUseFakeDeviceForMediaStream which fakes both.
+// Lets the raw-PCM mic bridge back getUserMedia()'s mic with no launch flag and
+// no loss of the real webcam. See media/audio/agent_audio_bridge.h.
+MEDIA_EXPORT extern const char kUseFakeAudioInputOnly[];
 MEDIA_EXPORT extern const char kUseFakeMjpegDecodeAccelerator[];
 MEDIA_EXPORT extern const char kUseFileForFakeAudioCapture[];
 MEDIA_EXPORT extern const char kUseFileForFakeVideoCapture[];

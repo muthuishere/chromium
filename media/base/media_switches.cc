@@ -231,6 +231,10 @@ const char kUnsafelyAllowProtectedMediaIdentifierForDomain[] =
 // FakeVideoCaptureDeviceFactory::ParseFakeDevicesConfigFromOptionsString().
 const char kUseFakeDeviceForMediaStream[] = "use-fake-device-for-media-stream";
 
+// AGENT BUILD: fake only the microphone (audio input), not the camera. See the
+// declaration in media_switches.h and media/audio/agent_audio_bridge.h.
+const char kUseFakeAudioInputOnly[] = "use-fake-audio-input-only";
+
 // Use a fake device for accelerated decoding of MJPEG. This allows, for
 // example, testing of the communication to the GPU service without requiring
 // actual accelerator hardware to be present.

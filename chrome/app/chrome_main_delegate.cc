@@ -13,6 +13,7 @@
 #include "base/base_switches.h"
 #include "base/check.h"
 #include "base/command_line.h"
+#include "media/base/media_switches.h"
 #include "base/compiler_specific.h"
 #include "base/cpu.h"
 #include "base/dcheck_is_on.h"
@@ -1099,6 +1100,11 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
   // capture source must live in the same process to share that singleton;
   // out-of-process audio would split producer from consumer. Merged into
   // --disable-features so the setting propagates to child processes.
+  //
+  // Also default kUseFakeAudioInputOnly on: fake ONLY the microphone so the mic
+  // bridge backs getUserMedia() with no launch flag, while the real camera is
+  // untouched (unlike --use-fake-device-for-media-stream, which fakes both).
+  // The bridge silence-fills until armed, so an idle mic is quiet, not beeping.
   if (is_browser) {
     base::CommandLine* mutable_command_line =
         base::CommandLine::ForCurrentProcess();
@@ -1112,6 +1118,8 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
       mutable_command_line->AppendSwitchASCII(switches::kDisableFeatures,
                                               disabled_features);
     }
+    if (!mutable_command_line->HasSwitch(switches::kUseFakeAudioInputOnly))
+      mutable_command_line->AppendSwitch(switches::kUseFakeAudioInputOnly);
   }
 #if BUILDFLAG(IS_WIN)
   const bool pipes_are_specified_explicitly =

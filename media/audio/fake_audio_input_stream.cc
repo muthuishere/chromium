@@ -206,11 +206,16 @@ using AudioSourceCallback = AudioOutputStream::AudioSourceCallback;
 std::unique_ptr<AudioSourceCallback> FakeAudioInputStream::ChooseSource() {
   DCHECK(capture_thread_->task_runner()->BelongsToCurrentThread());
 
-  // AGENT BUILD: when the raw-PCM bridge is armed, feed the fake mic from it
-  // (browser process pushes samples via the watcher's /mic WebSocket or
-  // PLAYWAV). Takes precedence over the file/beep sources.
-  if (AgentAudioBridge::Get().input_enabled())
+  // AGENT BUILD: when the raw-PCM bridge is armed -- or when the fork is faking
+  // only the mic (kUseFakeAudioInputOnly, the default) -- feed the fake mic from
+  // the bridge (browser process pushes samples via the watcher's /mic WebSocket
+  // or PLAYWAV). Takes precedence over the file/beep sources; the bridge
+  // silence-fills until armed, so an idle mic is quiet rather than beeping.
+  if (AgentAudioBridge::Get().input_enabled() ||
+      base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kUseFakeAudioInputOnly)) {
     return std::make_unique<AgentBridgeSource>(params_);
+  }
 
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
       switches::kUseFileForFakeAudioCapture)) {
