@@ -15,6 +15,7 @@
 
 #include "base/files/file_path.h"
 #include "base/memory/weak_ptr.h"
+#include "base/threading/sequence_bound.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "content/public/browser/render_widget_host.h"
@@ -128,6 +129,18 @@ class SendKeysWatcher {
   void InjectSelectTab(const std::string& index_str);
   void InjectListTabs(const std::string& id);
 
+  // Raw-PCM microphone bridge (agent build). AUDIOSTART:<port> boots a
+  // localhost-only WebSocket server (net::HttpServer) whose /mic endpoint
+  // receives raw interleaved int16 mono 48kHz PCM and feeds it into the fake
+  // microphone that getUserMedia() sees, via media::AgentAudioBridge.
+  // AUDIOSTOP tears it down. PLAYWAV:<path> pushes a 16-bit PCM WAV file into
+  // the same bridge one-shot (no socket needed). All require launching with
+  // --use-fake-device-for-media-stream so the page's mic is the fake device
+  // this bridge backs. See //CHROMIUM_SENDKEYS_SPEC.md.
+  void InjectAudioStart(const std::string& port_str);
+  void InjectAudioStop();
+  void InjectPlayWav(const std::string& path);
+
   // Resolves the active tab's WebContents via
   // GetLastActiveBrowserWindowInterfaceWithAnyProfile(). May return nullptr.
   content::WebContents* GetTargetWebContents();
@@ -146,6 +159,12 @@ class SendKeysWatcher {
   // Attached only while a NETLOG:START...NETLOG:STOP span is active.
   class NetworkLogObserver;
   std::unique_ptr<NetworkLogObserver> netlog_observer_;
+
+  // Owns the localhost WebSocket audio server (net::HttpServer) while an
+  // AUDIOSTART..AUDIOSTOP span is active. Lives on the browser IO thread --
+  // constructed and destroyed there via base::SequenceBound.
+  class AudioBridgeServer;
+  base::SequenceBound<AudioBridgeServer> audio_server_;
 
   base::WeakPtrFactory<SendKeysWatcher> weak_factory_{this};
 };

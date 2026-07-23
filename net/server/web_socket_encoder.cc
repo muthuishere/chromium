@@ -81,12 +81,15 @@ WebSocketParseResult DecodeFrameHybi17(std::string_view frame,
     case WebSocketFrameHeader::OpCodeEnum::kOpCodeText:
     case WebSocketFrameHeader::OpCodeEnum::
         kOpCodeContinuation:  // Treated in the same as kOpCodeText.
+    // AGENT BUILD: accept binary frames too (raw PCM/media over the sendkeys
+    // watcher's WebSocket bridge). The payload bytes are surfaced to the
+    // delegate via OnWebSocketMessage the same way text is; the opcode is not
+    // otherwise distinguished.
+    case WebSocketFrameHeader::OpCodeEnum::kOpCodeBinary:
     case WebSocketFrameHeader::OpCodeEnum::kOpCodePing:
     case WebSocketFrameHeader::OpCodeEnum::kOpCodePong:
       break;
 
-    case WebSocketFrameHeader::OpCodeEnum::kOpCodeBinary:  // We don't support
-                                                           // binary frames yet.
     default:
       return WebSocketParseResult::FRAME_ERROR;
   }

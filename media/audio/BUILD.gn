@@ -44,6 +44,8 @@ source_set("audio") {
     "aecdump_recording_manager.cc",
     "aecdump_recording_manager.h",
     "agc_audio_stream.h",
+    "agent_audio_bridge.cc",
+    "agent_audio_bridge.h",
     "alive_checker.cc",
     "alive_checker.h",
     "application_loopback_device_helper.cc",

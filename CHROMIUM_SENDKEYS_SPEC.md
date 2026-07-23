@@ -251,6 +251,62 @@ direction), delete it once read, and print its contents. `netlog start`/
 `netlog stop <path>` are fire-and-forget on the way in; the log itself lands
 directly at the path given to `stop`, not in `results/`.
 
+### Extension: raw-PCM microphone bridge (AUDIOSTART / PLAYWAV) — BUILT 2026-07-23
+
+The agent needs to *speak into* a page — feed custom audio to `getUserMedia()`
+(e.g. a Teams call) without a virtual audio driver (no BlackHole). The bridge
+does this entirely in-fork.
+
+**The cross-process problem, and the fix.** `FakeAudioInputStream`
+(`media/audio/fake_audio_input_stream.cc`) is the fake mic Chromium hands to
+`getUserMedia()` when launched with `--use-fake-device-for-media-stream`; its
+`ChooseSource()` normally returns a beep or a `--use-file-for-fake-audio-capture`
+WAV. But that stream runs in the **out-of-process audio service**, while the
+watcher (and its WebSocket server) runs in the **browser process** — a shared
+in-memory buffer can't reach across. So the fork forces the audio service
+**in-process** (`chrome_main_delegate.cc` appends
+`--disable-features=AudioServiceOutOfProcess` for the browser process). Then a
+single process-global singleton, **`media/audio/agent_audio_bridge.{h,cc}`
+(`media::AgentAudioBridge`)**, is visible to both sides: producers push PCM,
+`ChooseSource()` returns a bridge-backed source that pulls it.
+
+**Data path:** `AUDIOSTART:<port>` (dispatched before the active-tab lookup, so
+it works with no focused tab) sets `AgentAudioBridge::set_input_enabled(true)`
+and stands up a `net::HttpServer` (the same server class DevTools uses) on a
+`net::TCPServerSocket` bound to `127.0.0.1:<port>`, created and owned on the
+browser **IO thread** via `base::SequenceBound`. A client connects to
+`ws://127.0.0.1:<port>/mic` and sends **binary WebSocket frames of interleaved
+int16 PCM** (mono, 48 kHz is the zero-conversion path; the bridge downmixes and
+linearly resamples anything else to an internal mono/48 kHz ring buffer).
+`OnWebSocketMessage` reinterprets the bytes and calls
+`AgentAudioBridge::PushInterleavedInt16`. On the audio capture thread,
+`AgentBridgeSource::OnMoreData` calls `AgentAudioBridge::FillBus`, which
+resamples the ring to the device's rate, replicates mono across channels, and
+**silence-fills on underrun** (so gaps are quiet, not glitchy). `AUDIOSTOP`
+resets the `SequenceBound` (destroying the server on the IO thread), disarms,
+and flushes. `PLAYWAV:<path>` is the socket-free shortcut: it decodes a 16-bit
+PCM WAV with `media::WavAudioHandler`, downmixes to mono, and pushes it in one
+shot.
+
+**One net change:** `net::HttpServer`'s WebSocket layer historically rejected
+binary frames (`net/server/web_socket_encoder.cc` returned `FRAME_ERROR`). The
+fork makes `kOpCodeBinary` fall through like text on decode — additive and safe
+(DevTools only ever sends text). Server→client binary (needed later for `/tap`
+and `/vtap`) will need the encode side too; not added yet.
+
+**Verified end-to-end:** with the fork launched under
+`--use-fake-device-for-media-stream`, `AUDIOSTART:38701` opened the port (closed
+before the command, open after), a page streamed a 440 Hz int16 sine to `/mic`,
+and `getUserMedia()` + an `AnalyserNode` read it back at RMS 0.259 — exactly
+`peak/√2` for the injected amplitude, with the WebSocket never closing (binary
+frames accepted).
+
+**Still to build (same pattern):** `/tap` (receive a tab's output PCM via
+`content/browser/media/audio_loopback_stream_broker`) and the independent VIDEO
+server — `/cam` (send frames to a fake `VideoCaptureDevice`) and `/vtap`
+(receive rendered frames via the `CopyFromSurface` primitive the `SCREENSHOT`
+command already uses).
+
 ## Protocol summary (quick reference)
 
 | Env var                  | Effect                                                      |
@@ -269,6 +325,9 @@ directly at the path given to `stop`, not in `results/`.
 | `WAITFOR:<ms>\|<id>\|<js>`| Polls `<js>` every 100ms until truthy/timeout, writes `results/<id>.json` |
 | `NETLOG:START`           | Starts recording resource loads on the active tab                    |
 | `NETLOG:STOP:<path>`     | Stops recording, writes the JSON array to `<path>`                    |
+| `AUDIOSTART:<port>`      | Boots the `/mic` WebSocket on `127.0.0.1:<port>`, arms the mic bridge |
+| `AUDIOSTOP`              | Tears the mic server down, disarms + flushes the bridge              |
+| `PLAYWAV:<path>`         | One-shot: decodes a 16-bit PCM WAV and pushes it into the fake mic   |
 | *(bare line)*            | Treated as `TEXT:`                                                  |
 
 Constraints: `\n` is always the file's line separator; files must be
@@ -343,6 +402,12 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 | `components/permissions/permission_context_base.cc` | **Security relaxation:** `DecidePermission()` auto-grants every permission (no prompt) — see below |
 | `components/os_crypt/common/keychain_password_mac.mm` | **Keychain-free profile:** `GetPassword()` reads the OSCrypt key from a file (`$CHROMIUM_AGENT_OSCRYPT_KEY_FILE` / `~/.config/chromium-agent/oscrypt.key`) before falling back to the macOS Keychain — no prompt, and decrypts a profile copied from another browser when seeded with its key |
 | `chrome/browser/sendkeys_watcher.{cc,h}` | Tab/window commands `NEWTAB`/`NEWWINDOW`/`CLOSETAB`/`SELECTTAB`/`LISTTABS` (act on the last-active window; `GOTO`/`EVAL` still target the active tab) |
+| `media/audio/agent_audio_bridge.{cc,h}` (new) | **Mic bridge:** process-global `AgentAudioBridge` singleton — a mono/48 kHz ring buffer fed by the browser process, drained by the fake mic |
+| `media/audio/fake_audio_input_stream.cc`      | **Mic bridge:** `ChooseSource()` returns a bridge-backed source when `AgentAudioBridge::input_enabled()` |
+| `media/audio/BUILD.gn`                          | **Mic bridge:** added `agent_audio_bridge.{cc,h}` to the `audio` target |
+| `net/server/web_socket_encoder.cc`             | **Mic bridge:** accept binary WebSocket frames on decode (was `FRAME_ERROR`) so raw PCM can flow |
+| `chrome/app/chrome_main_delegate.cc`          | **Mic bridge:** forces the audio service in-process (`--disable-features=AudioServiceOutOfProcess`) so the browser-process bridge reaches the fake mic |
+| `chrome/browser/sendkeys_watcher.{cc,h}` | **Mic bridge:** `AUDIOSTART`/`AUDIOSTOP` (a localhost `net::HttpServer` on `/mic`) + `PLAYWAV` |
 
 ## Security relaxations (agent build — CORS + CSP off)
 

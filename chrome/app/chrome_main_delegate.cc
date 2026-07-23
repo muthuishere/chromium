@@ -10,6 +10,7 @@
 #include <variant>
 
 #include "base/base_paths.h"
+#include "base/base_switches.h"
 #include "base/check.h"
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
@@ -1091,6 +1092,27 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
   // The DevTools remote debugging pipe file descriptors need to be checked
   // before any other files are opened, see https://crbug.com/40259890.
   const bool is_browser = !command_line.HasSwitch(switches::kProcessType);
+
+  // AGENT BUILD: force the audio service to run IN-PROCESS. The raw-PCM mic
+  // bridge (media::AgentAudioBridge, fed from the browser process by the
+  // sendkeys watcher's /mic WebSocket and PLAYWAV) and FakeAudioInputStream's
+  // capture source must live in the same process to share that singleton;
+  // out-of-process audio would split producer from consumer. Merged into
+  // --disable-features so the setting propagates to child processes.
+  if (is_browser) {
+    base::CommandLine* mutable_command_line =
+        base::CommandLine::ForCurrentProcess();
+    std::string disabled_features =
+        mutable_command_line->GetSwitchValueASCII(switches::kDisableFeatures);
+    if (disabled_features.find("AudioServiceOutOfProcess") ==
+        std::string::npos) {
+      if (!disabled_features.empty())
+        disabled_features += ",";
+      disabled_features += "AudioServiceOutOfProcess";
+      mutable_command_line->AppendSwitchASCII(switches::kDisableFeatures,
+                                              disabled_features);
+    }
+  }
 #if BUILDFLAG(IS_WIN)
   const bool pipes_are_specified_explicitly =
       command_line.HasSwitch(::switches::kRemoteDebuggingIoPipes);

@@ -23,9 +23,11 @@
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
+#include "media/audio/agent_audio_bridge.h"
 #include "media/audio/audio_manager_base.h"
 #include "media/audio/simple_sources.h"
 #include "media/base/audio_bus.h"
+#include "media/base/audio_glitch_info.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/media_switches.h"
 
@@ -33,7 +35,30 @@ namespace media {
 
 namespace {
 std::atomic<bool> g_fake_input_streams_are_muted;
-}
+
+// AGENT BUILD: an AudioSourceCallback that pulls its samples from the
+// process-global AgentAudioBridge (fed by the browser process over the
+// watcher's WebSocket /mic endpoint, or by PLAYWAV). Selected by ChooseSource()
+// when AgentAudioBridge::input_enabled() is set.
+class AgentBridgeSource : public AudioOutputStream::AudioSourceCallback {
+ public:
+  explicit AgentBridgeSource(const AudioParameters& params)
+      : sample_rate_(params.sample_rate()) {}
+
+  int OnMoreData(base::TimeDelta /*delay*/,
+                 base::TimeTicks /*delay_timestamp*/,
+                 const AudioGlitchInfo& /*glitch_info*/,
+                 AudioBus* dest) override {
+    AgentAudioBridge::Get().FillBus(dest, sample_rate_);
+    return dest->frames();
+  }
+
+  void OnError(ErrorType /*type*/) override {}
+
+ private:
+  const int sample_rate_;
+};
+}  // namespace
 
 AudioInputStream* FakeAudioInputStream::MakeFakeStream(
     AudioManagerBase* manager,
@@ -180,6 +205,12 @@ void FakeAudioInputStream::ReadAudioFromSource(base::TimeTicks ideal_time,
 using AudioSourceCallback = AudioOutputStream::AudioSourceCallback;
 std::unique_ptr<AudioSourceCallback> FakeAudioInputStream::ChooseSource() {
   DCHECK(capture_thread_->task_runner()->BelongsToCurrentThread());
+
+  // AGENT BUILD: when the raw-PCM bridge is armed, feed the fake mic from it
+  // (browser process pushes samples via the watcher's /mic WebSocket or
+  // PLAYWAV). Takes precedence over the file/beep sources.
+  if (AgentAudioBridge::Get().input_enabled())
+    return std::make_unique<AgentBridgeSource>(params_);
 
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
       switches::kUseFileForFakeAudioCapture)) {

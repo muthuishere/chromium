@@ -131,52 +131,51 @@ each **OFF by default**, each **started on its own port** and **stopped independ
 audio-only, video-only, or both). Each server is **two-way**. Bound **127.0.0.1 only** (expose
 via a cloudflared tunnel if ever needed — never bind 0.0.0.0).
 
-Audio server (`audio start <port>`):
-- `ws://127.0.0.1:<port>/mic`  — **you send** PCM in → becomes the tab's microphone.
-- `ws://127.0.0.1:<port>/tap`  — **you receive** the tab's audio output PCM out.
+Audio server (`AUDIOSTART:<port>`):
+- `ws://127.0.0.1:<port>/mic`  — **you send** PCM in → becomes the tab's microphone. **BUILT + VERIFIED.**
+- `ws://127.0.0.1:<port>/tap`  — **you receive** the tab's audio output PCM out. *(not built yet)*
 
-Video server (`video start <port>`, its own port):
+Video server (`VIDEOSTART:<port>`, its own port): *(not built yet — audio slice shipped first)*
 - `ws://127.0.0.1:<port>/cam`  — **you send** frames in → becomes the tab's camera.
 - `ws://127.0.0.1:<port>/vtap` — **you receive** the tab's rendered video frames out.
 
-Formats: audio = interleaved **int16, 48 kHz stereo**; video = raw **I420** (size+fps in a JSON
-handshake frame, e.g. `{"width":1280,"height":720,"fps":30,"format":"I420"}`).
+Formats: `/mic` audio = **binary WebSocket frames of interleaved int16 PCM, mono, 48 kHz** (the
+fork downmixes/resamples internally, so any rate/channel input is fine but 48 kHz mono is the
+zero-conversion path). Video (when built) = raw **I420** with a JSON handshake frame, e.g.
+`{"width":1280,"height":720,"fps":30,"format":"I420"}`.
 
 **Per-tab?** RECEIVE (`/tap`, `/vtap`) is per-tab (bound to the active/selected WebContents).
 SEND (`/mic`, `/cam`) is a browser-global fake device — whichever tab calls getUserMedia
 consumes it, so use `selecttab` to control which tab captures. You can't feed two tabs
 different streams from one source.
 
-**Watcher commands** (start each server on its own port → arm streams → stop; media bytes flow
-over the WS, not the spool):
+**PREREQUISITE (mic in):** launch the fork with **`--use-fake-device-for-media-stream`** so the
+page's `getUserMedia()` mic is the fake device the bridge backs. The fork automatically forces the
+audio service **in-process** (`--disable-features=AudioServiceOutOfProcess`, done in
+`chrome_main_delegate.cc`) so the browser-process bridge and the fake capture stream share one
+process — you do NOT pass that yourself.
 
-```bash
-# File shortcuts — work TODAY via built-in fake-device flags, no rebuild:
-#   mic:  --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=/abs/a.wav
-#   cam:  --use-fake-device-for-media-stream --use-file-for-fake-video-capture=/abs/v.y4m
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playwav   /abs/a.wav
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys playvideo /abs/v.y4m   # Y4M (or MJPEG)
+**Watcher spool commands** (the raw protocol is the source of truth; media bytes flow over the WS,
+not the spool). BUILT + VERIFIED end-to-end (a 440 Hz int16 sine sent to `/mic` was read back by
+`getUserMedia()` at the exact expected RMS):
 
-# Live raw streaming (ships with the media-bridge build) — two independent servers:
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio start 8778  # boot AUDIO server on :8778
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys micstream on      #   attach /mic   (send audio)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys tapaudio  on      #   attach /tap   (recv audio)
-
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys video start 8779  # boot VIDEO server on :8779
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys camstream on      #   attach /cam   (send video)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys vtap      on      #   attach /vtap  (recv video)
-
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys audio stop        # stop AUDIO server (video keeps running)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys video stop        # stop VIDEO server
+```text
+AUDIOSTART:<port>     # boot the localhost mic WebSocket on 127.0.0.1:<port>, arm the bridge
+PLAYWAV:/abs/a.wav    # one-shot: decode a 16-bit PCM WAV and push it into the mic (no socket needed)
+AUDIOSTOP             # tear the server down, disarm + flush the bridge
 ```
 
-> STATUS: `playwav`/`playvideo` (file injection) work via the built-in fake-device flags.
-> The live WebSocket servers (`audio start`/`video start` + `micstream`/`tapaudio`/`camstream`/`vtap`)
-> are implemented by the in-fork media bridge — build with "build the audio websocket bridge".
-> Backed by Chromium's own `media/audio/fake_audio_input_stream.cc` +
-> `media/capture/video/file_video_capture_device.cc` (send), and
-> `content/browser/media/audio_loopback_stream_broker.cc` + `CopyFromSurface` (receive) — no
-> external driver. Video gotcha: frames must be valid I420/Y4M at a supported size or nothing renders.
+Then stream to it (binary frames, int16 mono 48 kHz), e.g. from the page or any client:
+`const ws = new WebSocket("ws://127.0.0.1:<port>/mic"); ws.binaryType="arraybuffer"; ws.send(int16buf.buffer);`
+
+> STATUS (2026-07-23): the **mic-in slice is shipped in `main` and verified** — `AUDIOSTART` /
+> `AUDIOSTOP` (the `/mic` WebSocket server via `net::HttpServer`) + `PLAYWAV`, backed by a new
+> `media/audio/agent_audio_bridge.{h,cc}` singleton feeding `media/audio/fake_audio_input_stream.cc`.
+> `net/server/web_socket_encoder.cc` was extended to accept binary frames. STILL TO BUILD (follow-up
+> slices, same pattern): `/tap` (receive tab audio via `audio_loopback_stream_broker`) and the whole
+> VIDEO server (`/cam` send + `/vtap` via `CopyFromSurface`). File shortcut for camera today,
+> launch-flag only: `--use-fake-device-for-media-stream --use-file-for-fake-video-capture=/abs/v.y4m`.
+> Video gotcha: frames must be valid I420/Y4M at a supported size or nothing renders.
 
 Raw protocol (bypassing the CLI, e.g. from another language): stage lines
 into a file, then atomically publish — never write directly into the spool

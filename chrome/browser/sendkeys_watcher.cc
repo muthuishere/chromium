@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/environment.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
@@ -46,6 +47,16 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/isolated_world_ids.h"
+#include "media/audio/agent_audio_bridge.h"
+#include "media/audio/wav_audio_handler.h"
+#include "media/base/audio_bus.h"
+#include "net/base/ip_endpoint.h"
+#include "net/base/net_errors.h"
+#include "net/log/net_log_source.h"
+#include "net/server/http_server.h"
+#include "net/server/http_server_request_info.h"
+#include "net/socket/tcp_server_socket.h"
+#include "net/traffic_annotation/network_traffic_annotation.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 #include "ui/base/page_transition_types.h"
@@ -375,6 +386,97 @@ class SendKeysWatcher::NetworkLogObserver : public content::WebContentsObserver 
   base::ListValue entries_;
 };
 
+namespace {
+
+constexpr net::NetworkTrafficAnnotationTag kAudioBridgeTrafficAnnotation =
+    net::DefineNetworkTrafficAnnotation("sendkeys_audio_bridge", R"(
+        semantics {
+          sender: "Chromium sendkeys agent audio bridge"
+          description:
+            "A localhost-only (127.0.0.1) WebSocket server started on demand by "
+            "the AUDIOSTART spool command. Its /mic endpoint receives raw int16 "
+            "PCM audio that is fed into the fake microphone so an automated "
+            "agent can speak into a page's getUserMedia() stream."
+          trigger: "The AUDIOSTART:<port> spool command."
+          data: "Raw int16 PCM audio samples supplied by the local agent."
+          destination: LOCAL
+          internal {
+            contacts { email: "muthuishere@gmail.com" }
+          }
+          last_reviewed: "2026-07-23"
+          user_data { type: NONE }
+        }
+        policy {
+          cookies_allowed: NO
+          setting:
+            "This is a build-time agent-fork feature and is not user "
+            "configurable. The server binds to localhost only and is off "
+            "until AUDIOSTART is issued."
+          policy_exception_justification:
+            "Agent build only; the socket is bound to 127.0.0.1."
+        })");
+
+}  // namespace
+
+// Localhost-only WebSocket server that receives raw PCM on /mic and feeds it
+// into the fake microphone via media::AgentAudioBridge. Constructed and used
+// exclusively on the browser IO thread (owned by base::SequenceBound).
+class SendKeysWatcher::AudioBridgeServer : public net::HttpServer::Delegate {
+ public:
+  explicit AudioBridgeServer(int port) {
+    auto socket = std::make_unique<net::TCPServerSocket>(
+        /*net_log=*/nullptr, net::NetLogSource());
+    int rv = socket->ListenWithAddressAndPort("127.0.0.1", port, /*backlog=*/5);
+    if (rv != net::OK) {
+      LOG(ERROR) << "[sendkeys] AUDIOSTART: cannot listen on 127.0.0.1:" << port
+                 << " (" << net::ErrorToString(rv) << ")";
+      return;
+    }
+    server_ = std::make_unique<net::HttpServer>(std::move(socket), this);
+    net::IPEndPoint local;
+    if (server_->GetLocalAddress(&local) == net::OK) {
+      LOG(INFO) << "[sendkeys] audio bridge listening on ws://"
+                << local.ToString() << "/mic";
+    }
+  }
+
+  ~AudioBridgeServer() override = default;
+
+  AudioBridgeServer(const AudioBridgeServer&) = delete;
+  AudioBridgeServer& operator=(const AudioBridgeServer&) = delete;
+
+  // net::HttpServer::Delegate:
+  void OnConnect(int /*connection_id*/) override {}
+  void OnHttpRequest(int connection_id,
+                     const net::HttpServerRequestInfo& /*info*/) override {
+    if (server_)
+      server_->Send404(connection_id, kAudioBridgeTrafficAnnotation);
+  }
+  void OnWebSocketRequest(int connection_id,
+                          const net::HttpServerRequestInfo& info) override {
+    if (server_)
+      server_->AcceptWebSocket(connection_id, info,
+                               kAudioBridgeTrafficAnnotation);
+  }
+  void OnWebSocketMessage(int /*connection_id*/, std::string data) override {
+    // Payload is raw interleaved int16 mono PCM at the bridge's internal rate.
+    // Copy through a typed buffer to avoid any unaligned int16 access on the
+    // string storage.
+    const size_t frames = data.size() / sizeof(int16_t);
+    if (frames == 0)
+      return;
+    std::vector<int16_t> pcm(frames);
+    base::as_writable_byte_span(pcm).copy_from(
+        base::as_byte_span(data).first(frames * sizeof(int16_t)));
+    media::AgentAudioBridge::Get().PushInterleavedInt16(
+        pcm, /*channels=*/1, media::AgentAudioBridge::kInternalRate);
+  }
+  void OnClose(int /*connection_id*/) override {}
+
+ private:
+  std::unique_ptr<net::HttpServer> server_;
+};
+
 SendKeysWatcher::SendKeysWatcher() = default;
 
 SendKeysWatcher::~SendKeysWatcher() {
@@ -410,6 +512,10 @@ void SendKeysWatcher::Stop() {
   thread_.reset();
   observer_.reset();
   netlog_observer_.reset();
+  // Tear the audio bridge server down while the IO thread is still alive.
+  audio_server_.Reset();
+  media::AgentAudioBridge::Get().set_input_enabled(false);
+  media::AgentAudioBridge::Get().Clear();
   LOG(INFO) << "sendkeys watcher stopped";
 }
 
@@ -474,10 +580,90 @@ content::WebContents* SendKeysWatcher::GetTargetWebContents() {
   return tab->GetContents();
 }
 
+void SendKeysWatcher::InjectAudioStart(const std::string& port_str) {
+  int port = 0;
+  if (!base::StringToInt(port_str, &port) || port <= 0 || port > 65535) {
+    LOG(WARNING) << "[sendkeys] AUDIOSTART: bad port '" << port_str << "'";
+    return;
+  }
+  media::AgentAudioBridge::Get().Clear();
+  media::AgentAudioBridge::Get().set_input_enabled(true);
+  audio_server_ = base::SequenceBound<AudioBridgeServer>(
+      content::GetIOThreadTaskRunner({}), port);
+  LOG(INFO) << "[sendkeys] AUDIOSTART: mic bridge armed on port " << port
+            << " (send int16 mono 48kHz PCM to ws://127.0.0.1:" << port
+            << "/mic)";
+}
+
+void SendKeysWatcher::InjectAudioStop() {
+  audio_server_.Reset();
+  media::AgentAudioBridge::Get().set_input_enabled(false);
+  media::AgentAudioBridge::Get().Clear();
+  LOG(INFO) << "[sendkeys] AUDIOSTOP: mic bridge disarmed";
+}
+
+void SendKeysWatcher::InjectPlayWav(const std::string& path) {
+  std::string wav_data;
+  if (!base::ReadFileToString(base::FilePath(path), &wav_data)) {
+    LOG(WARNING) << "[sendkeys] PLAYWAV: cannot read '" << path << "'";
+    return;
+  }
+  std::unique_ptr<media::WavAudioHandler> handler =
+      media::WavAudioHandler::Create(base::as_byte_span(wav_data));
+  if (!handler) {
+    LOG(WARNING) << "[sendkeys] PLAYWAV: not a valid WAV '" << path << "'";
+    return;
+  }
+  const int channels = handler->GetNumChannels();
+  const int rate = handler->GetSampleRate();
+  const int total_frames = handler->total_frames_for_testing();
+  if (channels <= 0 || rate <= 0 || total_frames <= 0) {
+    LOG(WARNING) << "[sendkeys] PLAYWAV: empty/unsupported WAV '" << path << "'";
+    return;
+  }
+  std::unique_ptr<media::AudioBus> bus =
+      media::AudioBus::Create(channels, total_frames);
+  size_t written = 0;
+  if (!handler->CopyTo(bus.get(), &written) || written == 0) {
+    LOG(WARNING) << "[sendkeys] PLAYWAV: decoded no frames from '" << path
+                 << "'";
+    return;
+  }
+  std::vector<float> mono(written);
+  for (size_t i = 0; i < written; ++i) {
+    float sum = 0.f;
+    for (int c = 0; c < channels; ++c)
+      sum += bus->channel(c)[i];
+    mono[i] = sum / channels;
+  }
+  media::AgentAudioBridge::Get().set_input_enabled(true);
+  media::AgentAudioBridge::Get().PushMonoFloat(mono, rate);
+  LOG(INFO) << "[sendkeys] PLAYWAV: pushed " << written << " frames @ " << rate
+            << "Hz (" << channels << "ch) from " << path;
+}
+
 void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
   if (line.empty()) {
     return;
   }
+
+  // Audio bridge commands act on the process-global mic bridge, not a tab, so
+  // handle them before the active-tab lookup below (which would drop them when
+  // no tab is focused).
+  std::string audio_arg;
+  if (ConsumePrefix(line, "AUDIOSTART:", &audio_arg)) {
+    InjectAudioStart(audio_arg);
+    return;
+  }
+  if (line == "AUDIOSTOP") {
+    InjectAudioStop();
+    return;
+  }
+  if (ConsumePrefix(line, "PLAYWAV:", &audio_arg)) {
+    InjectPlayWav(audio_arg);
+    return;
+  }
+
   content::WebContents* contents = GetTargetWebContents();
   if (!contents) {
     LOG(WARNING) << "sendkeys: no active tab, dropping line: " << line;
