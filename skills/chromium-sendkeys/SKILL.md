@@ -3,13 +3,16 @@ name: chromium-sendkeys
 description: >
   Operational runbook for this fork's sendkeys input-injection spike
   (see //CHROMIUM_SENDKEYS_SPEC.md) — building the modified Chromium,
-  launching it with CHROMIUM_SENDKEYS_DIR set, driving it via
-  chromesendkeys.cjs (type/key/click/rightclick/goto/screenshot), and
-  verifying delivery without relying on CDP or OS-level UI automation.
-  Trigger on: "build the sendkeys spike", "launch chromium with sendkeys",
-  "inject keys/clicks into chromium", "test the chromium sendkeys watcher",
-  "drive this chromium build for e2e", or any mention of
-  CHROMIUM_SENDKEYS_DIR / chromesendkeys.cjs.
+  launching it with CHROMIUM_SENDKEYS_DIR set, and driving it via
+  chromesendkeys.cjs. Full command surface (see the §3b catalog): input
+  (type/key/click/rightclick), navigation + tabs (goto/newtab/newwindow/
+  selecttab/closetab/listtabs), scripting (eval/getdom/http/waitfor),
+  observation (screenshot/netlog), and microphone audio injection
+  (AUDIOSTART/PLAYWAV/AUDIOSTOP — mic faked by default, real camera kept).
+  All without CDP or OS-level UI automation. Trigger on: "build the sendkeys
+  spike", "launch chromium with sendkeys", "inject keys/clicks into chromium",
+  "drive this chromium build for e2e", "inject microphone audio", or any
+  mention of CHROMIUM_SENDKEYS_DIR / chromesendkeys.cjs.
 ---
 
 # chromium-sendkeys
@@ -157,11 +160,12 @@ which the fork does NOT set). The fork also forces the audio service **in-proces
 stream share one process. You pass none of this — just launch the fork normally (`chromeagent`) and
 issue the spool commands below. Until you arm/stream, the mic is **silent** (not beeping).
 
-**Command surface = raw spool lines.** `chromesendkeys.cjs` has NO audio verbs — drive the bridge
-by publishing these lines into the spool dir (`$CHROMIUM_SENDKEYS_DIR`, default
-`~/chrome-agent-sendkeys`) via stage-then-rename. BUILT + VERIFIED end-to-end (a 440 Hz int16 sine
-sent to `/mic` read back by `getUserMedia()` at the exact expected RMS; also verified live in the
-running fork by an open port):
+**Command surface = raw spool lines.** `chromesendkeys.cjs` has no dedicated `audio` verb, but its
+generic **`send <RAWLINE>`** verb publishes any spool line — so
+`chromesendkeys.cjs --dir ~/chrome-agent-sendkeys send AUDIOSTART:38701` is the one-liner CLI path
+(equivalent to the stage-then-rename below). BUILT + VERIFIED end-to-end (a 440 Hz int16 sine sent
+to `/mic` read back by `getUserMedia()` at the exact expected RMS; also verified live in the running
+fork by an open port):
 
 ```text
 AUDIOSTART:<port>     # boot the localhost mic WebSocket on 127.0.0.1:<port>, arm the bridge
@@ -211,6 +215,42 @@ mv ~/chrome-agent-sendkeys/.manual-staging \
 `mv`/`rename()` within the same filesystem is atomic on POSIX — this is why
 the protocol requires stage-then-rename rather than direct writes or
 appends inside the watched directory.
+
+## 3b. Command catalog — every command + when an agent reaches for it
+
+The complete surface (17 commands). `verb` = the `chromesendkeys.cjs` subcommand;
+`SPOOL:` = the raw line it writes (also usable via `send <line>` or stage-then-rename).
+Commands with a `results/<id>.json` return value are marked **←reads back**.
+
+| verb (CLI) | raw spool line | what it does | WHEN an agent uses it |
+|---|---|---|---|
+| `goto <url>` | `GOTO:<url>` | navigate the active tab's main frame | first step of almost any task — get to the page |
+| `type <text>` | `TEXT:<text>` | type text, one synthetic key event per char, into the focused element | fill a field the caret is already in; a bare line also = TEXT |
+| `key <chord>` | `KEY:<chord>` | one key chord: `enter`, `ctrl+a`, `cmd+shift+t`, `tab`… | submit a form, trigger a shortcut, move focus — one chord per line |
+| `click <x> <y>` | `CLICK:<x>,<y>` | left mousedown+up at widget-relative px | click something you located by coordinates (from a screenshot/eval rect) |
+| `rightclick <x> <y>` | `RIGHTCLICK:<x>,<y>` | right click → opens the **native** context menu | only when you actually need the OS context menu (it's not a DOM menu) |
+| `eval <js>` | `EVAL:<id>\|<js>` | run JS in the page's main frame; JSON result **←reads back** | the workhorse: read/mutate DOM, click by selector (`el.click()`), or `await fetch()` in-page. Prefer this over blind x/y clicks |
+| `getdom` | `EVAL:<id>\|documentElement.outerHTML` | dump the DOM **←reads back** | inspect page structure before deciding what to click/type |
+| `http <url>` | `EVAL:<id>\|await fetch(...)` | HTTP request **from inside the page** (its cookies/origin) **←reads back** | call an API as the logged-in page — no separate auth |
+| `waitfor <ms> <js>` | `WAITFOR:<ms>\|<id>\|<js>` | poll a JS predicate every 100ms until truthy or timeout **←reads back** | wait for SPA content/navigation to settle before the next step (don't sleep) |
+| `newtab [url]` | `NEWTAB:<url>` | open a foreground tab | parallel context, or open a link without losing the current tab |
+| `newwindow [url]` | `NEWWINDOW:<url>` | open a new window | separate window when tabs won't do |
+| `selecttab <i>` | `SELECTTAB:<i>` | activate tab by index | **GOTO/EVAL/type always hit the ACTIVE tab**, so selecttab + action = target any tab |
+| `closetab [i]` | `CLOSETAB:<i>` | close tab by index (omit = active) | clean up; closing the active tab is safe (no crash) |
+| `listtabs` | `LISTTABS:<id>` | array of `{index,title,url,active}` **←reads back** | discover what's open before selecttab/closetab |
+| `screenshot <path>` | `SCREENSHOT:<path>` | PNG of the current surface to `<path>` | capture visual state to reason over, or to find click coordinates |
+| `netlog start` | `NETLOG:START` | begin recording resource-load completions | before driving a flow you want the network trace of |
+| `netlog stop <path>` | `NETLOG:STOP:<path>` | stop, write JSON array of loads to `<path>` | after the flow — completion records only (no headers/body; not a live interceptor) |
+| `send AUDIOSTART:<port>` | `AUDIOSTART:<port>` | open the `/mic` WebSocket, arm the mic bridge | inject microphone audio into a call/page — then stream int16 mono 48 kHz to `ws://127.0.0.1:<port>/mic` |
+| `send PLAYWAV:<path>` | `PLAYWAV:<path>` | push a 16-bit PCM WAV into the mic, one-shot | speak a prerecorded/generated WAV into the page (no socket) |
+| `send AUDIOSTOP` | `AUDIOSTOP` | tear down the mic server, disarm + flush | done injecting audio |
+
+Rules of thumb for the agent:
+- **Prefer `eval` over `click x y`** when a selector exists — coordinates are brittle, `el.click()`/setting `.value` is not. Use screenshots + coordinates only when there's no stable selector (canvas, native UI).
+- **Always `waitfor` after a navigation or an action that loads content** instead of guessing a delay.
+- **`selecttab` before acting on a non-active tab** — every action command targets the active tab only.
+- **Read-back commands** (`eval`/`getdom`/`http`/`waitfor`/`listtabs`) block in the CLI and print JSON; the raw spool writes `results/<id>.json` (poll + delete it yourself if bypassing the CLI).
+- **Audio needs no launch flag** (mic is faked by default, camera stays real) — just `send AUDIOSTART:<port>` and stream.
 
 ## 4. Verify delivery
 
