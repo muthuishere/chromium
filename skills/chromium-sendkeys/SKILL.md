@@ -7,12 +7,17 @@ description: >
   chromesendkeys.cjs. Full command surface (see the §3b catalog): input
   (type/key/click/rightclick), navigation + tabs (goto/newtab/newwindow/
   selecttab/closetab/listtabs), scripting (eval/getdom/http/waitfor),
-  observation (screenshot/netlog), and microphone audio injection
-  (AUDIOSTART/PLAYWAV/AUDIOSTOP — mic faked by default, real camera kept).
-  All without CDP or OS-level UI automation. Trigger on: "build the sendkeys
-  spike", "launch chromium with sendkeys", "inject keys/clicks into chromium",
-  "drive this chromium build for e2e", "inject microphone audio", or any
-  mention of CHROMIUM_SENDKEYS_DIR / chromesendkeys.cjs.
+  observation (screenshot/netlog), microphone audio injection
+  (AUDIOSTART/PLAYWAV/AUDIOSTOP), and camera video injection
+  (VIDEOSTART/VIDEOSTOP — push I420 frames, e.g. an ffmpeg-decoded mp4, as the
+  webcam). Both mic and camera are faked by default (each via an independent
+  switch — kUseFakeAudioInputOnly / kUseFakeVideoInputOnly — so either can be
+  disabled to keep the real device); until you inject, the fake mic is silent
+  and the fake camera is black. All without CDP or OS-level UI
+  automation. Trigger on: "build the sendkeys spike", "launch chromium with
+  sendkeys", "inject keys/clicks into chromium", "drive this chromium build for
+  e2e", "inject microphone audio", "inject camera/webcam video", or any mention
+  of CHROMIUM_SENDKEYS_DIR / chromesendkeys.cjs.
 ---
 
 # chromium-sendkeys
@@ -162,11 +167,18 @@ different streams from one source.
 
 **NO LAUNCH FLAG NEEDED (mic in).** The fork defaults **`--use-fake-audio-input-only`** ON (forced
 in `chrome_main_delegate.cc` for the browser process), so `getUserMedia()`'s **microphone is already
-the bridge** — while the **real camera is untouched** (that needs `--use-fake-device-for-media-stream`,
-which the fork does NOT set). The fork also forces the audio service **in-process**
-(`--disable-features=AudioServiceOutOfProcess`) so the browser-process bridge and the fake capture
-stream share one process. You pass none of this — just launch the fork normally (`chromeagent`) and
-issue the spool commands below. Until you arm/stream, the mic is **silent** (not beeping).
+the bridge**. (The camera has its own independent default — see `/cam` below; the two switches don't
+affect each other, so faking the mic never touches the camera factory and vice-versa.) The fork also
+forces the audio service **in-process** (`--disable-features=AudioServiceOutOfProcess`) so the
+browser-process bridge and the fake capture stream share one process. You pass none of this — just
+launch the fork normally (`chromeagent`) and issue the spool commands below. Until you arm/stream,
+the mic is **silent** (not beeping).
+
+> **Default note:** the fork fakes BOTH the mic (`--use-fake-audio-input-only`) AND the camera
+> (`--use-fake-video-input-only`) by default, so `chromeagent` presents a silent mic + black camera
+> until you inject. The two switches are independent (faking one leaves the other's real device
+> alone), but both are force-appended in `chrome_main_delegate.cc`. To keep a REAL mic or camera by
+> default, remove that switch's default there.
 
 **Command surface = raw spool lines.** `chromesendkeys.cjs` has no dedicated `audio` verb, but its
 generic **`send <RAWLINE>`** verb publishes any spool line — so
@@ -201,16 +213,15 @@ printf 'AUDIOSTOP\n' > "$S/.stage" && mv "$S/.stage" "$S/mic-off.txt"
 
 > STATUS (2026-07-24): **shipped in `main` and verified.** `AUDIOSTART`/`AUDIOSTOP` (the `/mic`
 > `net::HttpServer`) + `PLAYWAV`, backed by `media/audio/agent_audio_bridge.{h,cc}` feeding
-> `fake_audio_input_stream.cc`; `net/server/web_socket_encoder.cc` accepts binary frames; the
-> mic-only default (`kUseFakeAudioInputOnly`, `media_switches` + `audio_manager_base.cc`) keeps the
-> real camera. **`/cam` also shipped** (VIDEOSTART/VIDEOSTOP + a fake `VideoCaptureDevice` fed by
-> `media/capture/video/agent_video_bridge`; `kUseFakeVideoInputOnly` fakes only the camera; capture
-> forced in-process + shared-memory buffers). STILL TO BUILD (same pattern, trigger "build the tap and video bridges"): `/tap`
-> (receive tab audio via `audio_loopback_stream_broker` + a binary-ENCODE addition to
-> `net/server/web_socket`) and the VIDEO server (`/cam` send + `/vtap` via `CopyFromSurface`). For a
-> fake CAMERA today (launch-flag only, replaces the real webcam):
-> `--use-fake-device-for-media-stream --use-file-for-fake-video-capture=/abs/v.y4m` — frames must be
-> valid I420/Y4M at a supported size or nothing renders.
+> `fake_audio_input_stream.cc`; `net/server/web_socket_encoder.cc` handles binary frames (decode +
+> encode). Mic faked by `kUseFakeAudioInputOnly` (`media_switches` + `audio_manager_base.cc`).
+> **`/cam` also shipped** (VIDEOSTART/VIDEOSTOP + a fake `VideoCaptureDevice` fed by
+> `media/capture/video/agent_video_bridge`; `kUseFakeVideoInputOnly` fakes the camera independently of
+> the mic; capture forced in-process via `content_features.cc` + shared-memory buffers via
+> `--disable-video-capture-use-gpu-memory-buffer`). Verified with a real ffmpeg-decoded mp4.
+> STILL TO BUILD (trigger "build the tap and video bridges"): `/tap` (receive tab audio via
+> `audio_loopback_stream_broker`, uses the binary encode) and `/vtap` (receive rendered frames via
+> `CopyFromSurface`).
 
 Raw protocol (bypassing the CLI, e.g. from another language): stage lines
 into a file, then atomically publish — never write directly into the spool
@@ -262,7 +273,7 @@ Rules of thumb for the agent:
 - **Always `waitfor` after a navigation or an action that loads content** instead of guessing a delay.
 - **`selecttab` before acting on a non-active tab** — every action command targets the active tab only.
 - **Read-back commands** (`eval`/`getdom`/`http`/`waitfor`/`listtabs`) block in the CLI and print JSON; the raw spool writes `results/<id>.json` (poll + delete it yourself if bypassing the CLI).
-- **Audio needs no launch flag** (mic is faked by default, camera stays real) — just `send AUDIOSTART:<port>` and stream.
+- **Audio and video need no launch flag** — mic and camera are both faked by default (silent mic / black camera until you inject). `send AUDIOSTART:<port>` then stream int16 PCM to `/mic`; `send VIDEOSTART:<port>` then stream `[w][h][I420]` frames to `/cam`.
 
 ## 4. Verify delivery
 

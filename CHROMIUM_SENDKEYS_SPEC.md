@@ -303,8 +303,9 @@ shot.
 **One net change:** `net::HttpServer`'s WebSocket layer historically rejected
 binary frames (`net/server/web_socket_encoder.cc` returned `FRAME_ERROR`). The
 fork makes `kOpCodeBinary` fall through like text on decode — additive and safe
-(DevTools only ever sends text). Server→client binary (needed later for `/tap`
-and `/vtap`) will need the encode side too; not added yet.
+(DevTools only ever sends text). The server→client binary **encode** side is
+also added (`EncodeBinaryFrame` + `HttpServer::SendBinaryOverWebSocket`) as the
+foundation for the future `/tap` and `/vtap` receive endpoints.
 
 **Verified end-to-end:** with the fork launched **with no media flag at all**,
 `AUDIOSTART:38701` opened the port (closed before the command, open after), a
@@ -314,11 +315,40 @@ amplitude, with the WebSocket never closing (binary frames accepted).
 `enumerateDevices()` still listed the real mics and a real (non-fake) video
 device, confirming the camera path is untouched.
 
+### Extension: `/cam` fake camera (VIDEOSTART / VIDEOSTOP) — BUILT 2026-07-24
+
+The video mirror of the mic bridge. `VIDEOSTART:<port>` stands up a localhost
+`net::HttpServer` whose `/cam` endpoint receives binary messages of
+`[int32 LE width][int32 LE height][tightly-packed I420]`; each is validated
+(size == `w*h*3/2`, even dims) and stored **last-frame-wins** in a process-global
+`media::AgentVideoBridge` (`media/capture/video/agent_video_bridge.{h,cc}`). A
+bridge-fed `AgentVideoCaptureDevice` (mirror of `FileVideoCaptureDevice`) pulls
+the latest frame at 30 fps and delivers it, so `getUserMedia({video})` sees it as
+the camera. A single-device factory advertises "Agent Virtual Camera". The switch
+**`kUseFakeVideoInputOnly`** (defaulted on) selects this factory while leaving the
+real microphone alone — the mirror of `kUseFakeAudioInputOnly`.
+
+Two fixes were required to make frames actually flow (both essential, both mac-relevant):
+1. **In-process capture.** `GetVideoCaptureServiceConfiguration()` (content_features.cc)
+   returns in-process when the switch is set, so the browser-process `/cam` producer and
+   the device share one `AgentVideoBridge` singleton. (Doing it via
+   `--enable-features=RunVideoCaptureServiceInBrowserProcess` is unreliable — the
+   variations/field-trial init recomposes `--enable-features` and drops it.)
+2. **Shared-memory buffers.** The in-process capture service has no GPU channel, so the
+   NV12 GpuMemoryBuffer/IOSurface path (`GpuMemoryBufferTrackerApple`, which also NOTREACHEDs
+   on I420) fails its reserve and every frame is silently dropped. `chrome_main_delegate`
+   defaults `--disable-video-capture-use-gpu-memory-buffer`, so the device delivers plain
+   I420 via `OnIncomingCapturedData` — no GPU dependency. (The device still keeps the NV12
+   mappable-buffer branch for configs that do provide a GMB pool.)
+
+Verified end-to-end with **no launch flag**: a real H.264 `.mp4`, decoded by ffmpeg to raw
+I420 and streamed to `/cam`, comes out of `getUserMedia({video})` as the exact red/green/blue
+frames with motion; the real camera path is untouched when the switch isn't set.
+
 **Still to build (same pattern):** `/tap` (receive a tab's output PCM via
-`content/browser/media/audio_loopback_stream_broker`) and the independent VIDEO
-server — `/cam` (send frames to a fake `VideoCaptureDevice`) and `/vtap`
-(receive rendered frames via the `CopyFromSurface` primitive the `SCREENSHOT`
-command already uses).
+`content/browser/media/audio_loopback_stream_broker`) and `/vtap` (receive rendered
+frames via the `CopyFromSurface` primitive the `SCREENSHOT` command already uses).
+Both use the binary WS **encode** foundation that is already in place.
 
 ## Protocol summary (quick reference)
 
@@ -341,6 +371,8 @@ command already uses).
 | `AUDIOSTART:<port>`      | Boots the `/mic` WebSocket on `127.0.0.1:<port>`, arms the mic bridge |
 | `AUDIOSTOP`              | Tears the mic server down, disarms + flushes the bridge              |
 | `PLAYWAV:<path>`         | One-shot: decodes a 16-bit PCM WAV and pushes it into the fake mic   |
+| `VIDEOSTART:<port>`      | Boots the `/cam` WebSocket on `127.0.0.1:<port>`, arms the camera bridge |
+| `VIDEOSTOP`             | Tears the camera server down, disarms + flushes the frame            |
 | *(bare line)*            | Treated as `TEXT:`                                                  |
 
 Constraints: `\n` is always the file's line separator; files must be
@@ -423,6 +455,14 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 | `chrome/browser/sendkeys_watcher.{cc,h}` | **Mic bridge:** `AUDIOSTART`/`AUDIOSTOP` (a localhost `net::HttpServer` on `/mic`) + `PLAYWAV` |
 | `media/base/media_switches.{cc,h}` (new switch) | **Mic-only default:** declares `kUseFakeAudioInputOnly` ("use-fake-audio-input-only") — fake the mic, not the camera |
 | `media/audio/audio_manager_base.cc`           | **Mic-only default:** `MakeAudioInputStream` forces `AUDIO_FAKE` when that switch is set (same seam `kDisableAudioInput` uses) |
+| `media/capture/video/agent_video_bridge.{cc,h}` (new) | **/cam:** process-global I420 last-frame-wins bridge fed by the browser process |
+| `media/capture/video/agent_video_capture_device{,_factory}.{cc,h}` (new) | **/cam:** bridge-fed `VideoCaptureDevice` + single-device factory ("Agent Virtual Camera") |
+| `media/base/media_switches.{cc,h}` | **/cam:** `kUseFakeVideoInputOnly` ("use-fake-video-input-only") — fake the camera, not the mic |
+| `media/capture/video/create_video_capture_device_factory.cc` | **/cam:** factory seam selecting the agent factory on the switch (real camera untouched otherwise) |
+| `content/public/common/content_features.cc` | **/cam:** `GetVideoCaptureServiceConfiguration` forces capture in-process on the switch |
+| `chrome/app/chrome_main_delegate.cc` | **/cam:** defaults `kUseFakeVideoInputOnly` + `--disable-video-capture-use-gpu-memory-buffer` |
+| `net/server/{web_socket,web_socket_encoder,http_server}.{cc,h}` | **media bridge:** binary WS decode (accept) + encode (`EncodeBinaryFrame`, `SendBinaryOverWebSocket`) |
+| `chrome/browser/sendkeys_watcher.{cc,h}` | **media bridge:** `AUDIOSTART`/`AUDIOSTOP`/`PLAYWAV` (/mic) + `VIDEOSTART`/`VIDEOSTOP` (/cam) |
 
 ## Security relaxations (agent build — CORS + CSP off)
 
