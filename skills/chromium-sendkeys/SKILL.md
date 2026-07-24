@@ -138,9 +138,17 @@ Audio server (`AUDIOSTART:<port>`):
 - `ws://127.0.0.1:<port>/mic`  — **you send** PCM in → becomes the tab's microphone. **BUILT + VERIFIED.**
 - `ws://127.0.0.1:<port>/tap`  — **you receive** the tab's audio output PCM out. *(not built yet)*
 
-Video server (`VIDEOSTART:<port>`, its own port): *(not built yet — audio slice shipped first)*
-- `ws://127.0.0.1:<port>/cam`  — **you send** frames in → becomes the tab's camera.
-- `ws://127.0.0.1:<port>/vtap` — **you receive** the tab's rendered video frames out.
+Video server (`VIDEOSTART:<port>`, its own port):
+- `ws://127.0.0.1:<port>/cam`  — **you send** frames in → becomes the tab's camera. **BUILT + VERIFIED.**
+- `ws://127.0.0.1:<port>/vtap` — **you receive** the tab's rendered video frames out. *(not built yet)*
+
+`/cam` frame format: each binary WebSocket message = **`[int32 LE width][int32 LE height][tightly-packed
+I420 bytes]`** (even dimensions). No launch flag needed — the fork defaults `--use-fake-video-input-only`
+(fakes ONLY the camera; real mic untouched) and forces the capture service in-process. Enumerates as
+"Agent Virtual Camera". Stream an actual MP4 by decoding it to I420 with ffmpeg and pushing the frames:
+`ffmpeg -stream_loop -1 -re -i movie.mp4 -vf scale=640:480 -pix_fmt yuv420p -f rawvideo -` → prepend the
+8-byte `[w][h]` header per 460800-byte (640×480) frame → send to `/cam` (verified: an H.264 mp4's
+red/green/blue frames came out of getUserMedia({video}) with motion).
 
 Formats: `/mic` audio = **binary WebSocket frames of interleaved int16 PCM, mono, 48 kHz** (the
 fork downmixes/resamples internally, so any rate/channel input is fine but 48 kHz mono is the
@@ -195,7 +203,9 @@ printf 'AUDIOSTOP\n' > "$S/.stage" && mv "$S/.stage" "$S/mic-off.txt"
 > `net::HttpServer`) + `PLAYWAV`, backed by `media/audio/agent_audio_bridge.{h,cc}` feeding
 > `fake_audio_input_stream.cc`; `net/server/web_socket_encoder.cc` accepts binary frames; the
 > mic-only default (`kUseFakeAudioInputOnly`, `media_switches` + `audio_manager_base.cc`) keeps the
-> real camera. STILL TO BUILD (same pattern, trigger "build the tap and video bridges"): `/tap`
+> real camera. **`/cam` also shipped** (VIDEOSTART/VIDEOSTOP + a fake `VideoCaptureDevice` fed by
+> `media/capture/video/agent_video_bridge`; `kUseFakeVideoInputOnly` fakes only the camera; capture
+> forced in-process + shared-memory buffers). STILL TO BUILD (same pattern, trigger "build the tap and video bridges"): `/tap`
 > (receive tab audio via `audio_loopback_stream_broker` + a binary-ENCODE addition to
 > `net/server/web_socket`) and the VIDEO server (`/cam` send + `/vtap` via `CopyFromSurface`). For a
 > fake CAMERA today (launch-flag only, replaces the real webcam):
@@ -244,6 +254,8 @@ Commands with a `results/<id>.json` return value are marked **←reads back**.
 | `send AUDIOSTART:<port>` | `AUDIOSTART:<port>` | open the `/mic` WebSocket, arm the mic bridge | inject microphone audio into a call/page — then stream int16 mono 48 kHz to `ws://127.0.0.1:<port>/mic` |
 | `send PLAYWAV:<path>` | `PLAYWAV:<path>` | push a 16-bit PCM WAV into the mic, one-shot | speak a prerecorded/generated WAV into the page (no socket) |
 | `send AUDIOSTOP` | `AUDIOSTOP` | tear down the mic server, disarm + flush | done injecting audio |
+| `send VIDEOSTART:<port>` | `VIDEOSTART:<port>` | open the `/cam` WebSocket, arm the fake camera | inject webcam video into a call/page — then stream `[int32 w][int32 h][I420]` frames to `ws://127.0.0.1:<port>/cam` (e.g. ffmpeg-decoded mp4) |
+| `send VIDEOSTOP` | `VIDEOSTOP` | tear down the camera server, disarm + flush | done injecting video |
 
 Rules of thumb for the agent:
 - **Prefer `eval` over `click x y`** when a selector exists — coordinates are brittle, `el.click()`/setting `.value` is not. Use screenshots + coordinates only when there's no stable selector (canvas, native UI).
