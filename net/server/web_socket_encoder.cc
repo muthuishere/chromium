@@ -357,6 +357,14 @@ void WebSocketEncoder::EncodeTextFrame(std::string_view frame,
     EncodeFrameHybi17(frame, masking_key, false, op_code, output);
 }
 
+void WebSocketEncoder::EncodeBinaryFrame(std::string_view frame,
+                                         int masking_key,
+                                         std::string* output) {
+  // Uncompressed (media payloads are already raw and shouldn't be deflated).
+  constexpr auto op_code = WebSocketFrameHeader::OpCodeEnum::kOpCodeBinary;
+  EncodeFrameHybi17(frame, masking_key, false, op_code, output);
+}
+
 void WebSocketEncoder::EncodeCloseFrame(std::string_view frame,
                                         int masking_key,
                                         std::string* output) {

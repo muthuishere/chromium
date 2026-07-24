@@ -64,6 +64,10 @@ class NET_EXPORT HttpServer {
   void SendOverWebSocket(int connection_id,
                          std::string_view data,
                          NetworkTrafficAnnotationTag traffic_annotation);
+  // AGENT BUILD: send a binary WebSocket frame (raw PCM/I420 media bridge).
+  void SendBinaryOverWebSocket(int connection_id,
+                               std::string_view data,
+                               NetworkTrafficAnnotationTag traffic_annotation);
   // Sends the provided data directly to the given connection. No validation is
   // performed that data constitutes a valid HTTP response. A valid HTTP
   // response may be split across multiple calls to SendRaw.

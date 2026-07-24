@@ -47,9 +47,11 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/isolated_world_ids.h"
+#include "base/numerics/byte_conversions.h"
 #include "media/audio/agent_audio_bridge.h"
 #include "media/audio/wav_audio_handler.h"
 #include "media/base/audio_bus.h"
+#include "media/capture/video/agent_video_bridge.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_errors.h"
 #include "net/log/net_log_source.h"
@@ -477,6 +479,65 @@ class SendKeysWatcher::AudioBridgeServer : public net::HttpServer::Delegate {
   std::unique_ptr<net::HttpServer> server_;
 };
 
+// Localhost-only WebSocket server that receives raw I420 frames on /cam and
+// feeds them into the fake camera via media::AgentVideoBridge. Each WebSocket
+// message is: int32 LE width, int32 LE height, then the tightly-packed I420
+// bytes. Constructed and used exclusively on the browser IO thread.
+class SendKeysWatcher::VideoBridgeServer : public net::HttpServer::Delegate {
+ public:
+  explicit VideoBridgeServer(int port) {
+    auto socket = std::make_unique<net::TCPServerSocket>(
+        /*net_log=*/nullptr, net::NetLogSource());
+    int rv = socket->ListenWithAddressAndPort("127.0.0.1", port, /*backlog=*/5);
+    if (rv != net::OK) {
+      LOG(ERROR) << "[sendkeys] VIDEOSTART: cannot listen on 127.0.0.1:" << port
+                 << " (" << net::ErrorToString(rv) << ")";
+      return;
+    }
+    server_ = std::make_unique<net::HttpServer>(std::move(socket), this);
+    net::IPEndPoint local;
+    if (server_->GetLocalAddress(&local) == net::OK) {
+      LOG(INFO) << "[sendkeys] video bridge listening on ws://"
+                << local.ToString() << "/cam";
+    }
+  }
+
+  ~VideoBridgeServer() override = default;
+
+  VideoBridgeServer(const VideoBridgeServer&) = delete;
+  VideoBridgeServer& operator=(const VideoBridgeServer&) = delete;
+
+  // net::HttpServer::Delegate:
+  void OnConnect(int /*connection_id*/) override {}
+  void OnHttpRequest(int connection_id,
+                     const net::HttpServerRequestInfo& /*info*/) override {
+    if (server_)
+      server_->Send404(connection_id, kAudioBridgeTrafficAnnotation);
+  }
+  void OnWebSocketRequest(int connection_id,
+                          const net::HttpServerRequestInfo& info) override {
+    if (server_)
+      server_->AcceptWebSocket(connection_id, info,
+                               kAudioBridgeTrafficAnnotation);
+  }
+  void OnWebSocketMessage(int /*connection_id*/, std::string data) override {
+    // [int32 LE width][int32 LE height][I420 bytes]. AgentVideoBridge validates
+    // the frame size against the dimensions and drops mismatches.
+    base::span<const uint8_t> bytes = base::as_byte_span(data);
+    if (bytes.size() < 8u)
+      return;
+    const uint32_t width = base::U32FromLittleEndian(bytes.subspan<0u, 4u>());
+    const uint32_t height = base::U32FromLittleEndian(bytes.subspan<4u, 4u>());
+    media::AgentVideoBridge::Get().PushI420(bytes.subspan(8u),
+                                            static_cast<int>(width),
+                                            static_cast<int>(height));
+  }
+  void OnClose(int /*connection_id*/) override {}
+
+ private:
+  std::unique_ptr<net::HttpServer> server_;
+};
+
 SendKeysWatcher::SendKeysWatcher() = default;
 
 SendKeysWatcher::~SendKeysWatcher() {
@@ -512,10 +573,13 @@ void SendKeysWatcher::Stop() {
   thread_.reset();
   observer_.reset();
   netlog_observer_.reset();
-  // Tear the audio bridge server down while the IO thread is still alive.
+  // Tear the media bridge servers down while the IO thread is still alive.
   audio_server_.Reset();
   media::AgentAudioBridge::Get().set_input_enabled(false);
   media::AgentAudioBridge::Get().Clear();
+  video_server_.Reset();
+  media::AgentVideoBridge::Get().set_input_enabled(false);
+  media::AgentVideoBridge::Get().Clear();
   LOG(INFO) << "sendkeys watcher stopped";
 }
 
@@ -642,6 +706,28 @@ void SendKeysWatcher::InjectPlayWav(const std::string& path) {
             << "Hz (" << channels << "ch) from " << path;
 }
 
+void SendKeysWatcher::InjectVideoStart(const std::string& port_str) {
+  int port = 0;
+  if (!base::StringToInt(port_str, &port) || port <= 0 || port > 65535) {
+    LOG(WARNING) << "[sendkeys] VIDEOSTART: bad port '" << port_str << "'";
+    return;
+  }
+  media::AgentVideoBridge::Get().Clear();
+  media::AgentVideoBridge::Get().set_input_enabled(true);
+  video_server_ = base::SequenceBound<VideoBridgeServer>(
+      content::GetIOThreadTaskRunner({}), port);
+  LOG(INFO) << "[sendkeys] VIDEOSTART: camera bridge armed on port " << port
+            << " (send [int32 w][int32 h][I420] frames to ws://127.0.0.1:"
+            << port << "/cam)";
+}
+
+void SendKeysWatcher::InjectVideoStop() {
+  video_server_.Reset();
+  media::AgentVideoBridge::Get().set_input_enabled(false);
+  media::AgentVideoBridge::Get().Clear();
+  LOG(INFO) << "[sendkeys] VIDEOSTOP: camera bridge disarmed";
+}
+
 void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
   if (line.empty()) {
     return;
@@ -661,6 +747,15 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
   }
   if (ConsumePrefix(line, "PLAYWAV:", &audio_arg)) {
     InjectPlayWav(audio_arg);
+    return;
+  }
+  std::string video_arg;
+  if (ConsumePrefix(line, "VIDEOSTART:", &video_arg)) {
+    InjectVideoStart(video_arg);
+    return;
+  }
+  if (line == "VIDEOSTOP") {
+    InjectVideoStop();
     return;
   }
 

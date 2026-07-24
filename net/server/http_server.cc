@@ -92,6 +92,19 @@ void HttpServer::SendOverWebSocket(
       data, WebSocketFrameHeader::OpCodeEnum::kOpCodeText, traffic_annotation);
 }
 
+void HttpServer::SendBinaryOverWebSocket(
+    int connection_id,
+    std::string_view data,
+    NetworkTrafficAnnotationTag traffic_annotation) {
+  // AGENT BUILD: raw binary WebSocket frames for the media bridge (PCM/I420).
+  HttpConnection* connection = FindConnection(connection_id);
+  if (connection == nullptr)
+    return;
+  DCHECK(connection->web_socket());
+  connection->web_socket()->Send(
+      data, WebSocketFrameHeader::OpCodeEnum::kOpCodeBinary, traffic_annotation);
+}
+
 void HttpServer::SendRaw(int connection_id,
                          std::string_view data,
                          NetworkTrafficAnnotationTag traffic_annotation) {

@@ -68,6 +68,8 @@ source_set("capture_device_specific") {
   sources = [
     "content/animated_content_sampler.cc",
     "content/animated_content_sampler.h",
+    "video/agent_video_bridge.cc",
+    "video/agent_video_bridge.h",
     "content/capture_resolution_chooser.cc",
     "content/capture_resolution_chooser.h",
     "content/screen_enumerator.h",
@@ -99,6 +101,10 @@ source_set("capture_device_specific") {
 
   if (!is_android) {
     sources += [
+      "video/agent_video_capture_device.cc",
+      "video/agent_video_capture_device.h",
+      "video/agent_video_capture_device_factory.cc",
+      "video/agent_video_capture_device_factory.h",
       "video/file_video_capture_device.cc",
       "video/file_video_capture_device.h",
       "video/file_video_capture_device_factory.cc",

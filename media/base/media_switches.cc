@@ -235,6 +235,10 @@ const char kUseFakeDeviceForMediaStream[] = "use-fake-device-for-media-stream";
 // declaration in media_switches.h and media/audio/agent_audio_bridge.h.
 const char kUseFakeAudioInputOnly[] = "use-fake-audio-input-only";
 
+// AGENT BUILD: fake only the camera (video input), not the microphone. See the
+// declaration in media_switches.h and media/capture/video/agent_video_bridge.h.
+const char kUseFakeVideoInputOnly[] = "use-fake-video-input-only";
+
 // Use a fake device for accelerated decoding of MJPEG. This allows, for
 // example, testing of the communication to the GPU service without requiring
 // actual accelerator hardware to be present.

@@ -1120,6 +1120,24 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
     }
     if (!mutable_command_line->HasSwitch(switches::kUseFakeAudioInputOnly))
       mutable_command_line->AppendSwitch(switches::kUseFakeAudioInputOnly);
+
+    // Video counterpart: default kUseFakeVideoInputOnly ON (fake camera only,
+    // real mic untouched). The switch also forces the video-capture service
+    // in-process (see GetVideoCaptureServiceConfiguration in content_features.cc)
+    // so the browser-process AgentVideoBridge and the fake capture device share
+    // one process -- decided on the switch there rather than an --enable-features
+    // append here, which the variations init recomposes and clobbers.
+    if (!mutable_command_line->HasSwitch(switches::kUseFakeVideoInputOnly))
+      mutable_command_line->AppendSwitch(switches::kUseFakeVideoInputOnly);
+    // Force the shared-memory (non-GpuMemoryBuffer) capture buffer path. The
+    // in-process capture service has no GPU channel, so the NV12 IOSurface
+    // reserve the GMB path needs fails and every frame is dropped. Shared memory
+    // lets the fake device deliver plain I420 with no GPU dependency.
+    if (!mutable_command_line->HasSwitch(
+            "disable-video-capture-use-gpu-memory-buffer")) {
+      mutable_command_line->AppendSwitch(
+          "disable-video-capture-use-gpu-memory-buffer");
+    }
   }
 #if BUILDFLAG(IS_WIN)
   const bool pipes_are_specified_explicitly =

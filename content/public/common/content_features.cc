@@ -6,7 +6,9 @@
 
 #include <string>
 
+#include "base/command_line.h"
 #include "base/feature_list.h"
+#include "base/logging.h"
 #include "base/time/time.h"
 #include "build/android_buildflags.h"
 #include "build/build_config.h"
@@ -1554,6 +1556,16 @@ VideoCaptureServiceConfiguration GetVideoCaptureServiceConfiguration() {
 #elif BUILDFLAG(IS_IOS)
   return VideoCaptureServiceConfiguration::kEnabledForBrowserProcess;
 #else
+  // AGENT BUILD: the fake-camera bridge (media::AgentVideoBridge) is fed from
+  // the browser process, so capture MUST run in-process to share that singleton.
+  // Decide it directly on the switch rather than the
+  // kRunVideoCaptureServiceInBrowserProcess feature -- the latter is set via
+  // --enable-features, which the variations/field-trial init recomposes and
+  // clobbers, so it can't be relied on from chrome_main_delegate.
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kUseFakeVideoInputOnly)) {
+    return VideoCaptureServiceConfiguration::kEnabledForBrowserProcess;
+  }
   return base::FeatureList::IsEnabled(
              features::kRunVideoCaptureServiceInBrowserProcess)
              ? VideoCaptureServiceConfiguration::kEnabledForBrowserProcess

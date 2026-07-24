@@ -14,6 +14,7 @@
 #include "media/capture/video/fake_video_capture_device_factory.h"
 
 #if !BUILDFLAG(IS_ANDROID)
+#include "media/capture/video/agent_video_capture_device_factory.h"
 #include "media/capture/video/file_video_capture_device_factory.h"
 #endif
 
@@ -102,6 +103,14 @@ bool ShouldUseFakeVideoCaptureDeviceFactory() {
 std::unique_ptr<VideoCaptureDeviceFactory> CreateVideoCaptureDeviceFactory(
     scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
     gpu::GpuDriverBugWorkarounds* gpu_workarounds) {
+#if !BUILDFLAG(IS_ANDROID)
+  // AGENT BUILD: fake ONLY the camera (real mic untouched). Wins before the
+  // real-camera path and is independent of --use-fake-device-for-media-stream.
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kUseFakeVideoInputOnly)) {
+    return std::make_unique<AgentVideoCaptureDeviceFactory>();
+  }
+#endif
   if (ShouldUseFakeVideoCaptureDeviceFactory()) {
     return CreateFakeVideoCaptureDeviceFactory();
   } else {

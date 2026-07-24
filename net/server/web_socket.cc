@@ -162,12 +162,17 @@ void WebSocket::Send(std::string_view message,
       encoder_->EncodeTextFrame(message, 0, &encoded);
       break;
 
+    // AGENT BUILD: binary frames carry raw PCM/I420 for the media bridge.
+    case WebSocketFrameHeader::kOpCodeBinary:
+      encoder_->EncodeBinaryFrame(message, 0, &encoded);
+      break;
+
     case WebSocketFrameHeader::kOpCodePong:
       encoder_->EncodePongFrame(message, 0, &encoded);
       break;
 
     default:
-      // Only Pong and Text frame types are supported.
+      // Only Pong, Text and Binary frame types are supported.
       NOTREACHED();
   }
   server_->SendRaw(connection_->id(), encoded, traffic_annotation);

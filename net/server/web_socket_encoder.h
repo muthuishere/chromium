@@ -46,6 +46,11 @@ class NET_EXPORT WebSocketEncoder final {
   void EncodeTextFrame(std::string_view frame,
                        int masking_key,
                        std::string* output);
+  // AGENT BUILD: encode a binary frame (raw PCM/I420 over the media bridge).
+  // Sent uncompressed; media clients connect without permessage-deflate.
+  void EncodeBinaryFrame(std::string_view frame,
+                         int masking_key,
+                         std::string* output);
   void EncodePongFrame(std::string_view frame,
                        int masking_key,
                        std::string* output);

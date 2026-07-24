@@ -141,6 +141,15 @@ class SendKeysWatcher {
   void InjectAudioStop();
   void InjectPlayWav(const std::string& path);
 
+  // Raw-frame camera bridge (agent build). VIDEOSTART:<port> boots a
+  // localhost-only WebSocket server whose /cam endpoint receives raw I420
+  // frames (each message = int32 LE width, int32 LE height, then the I420
+  // bytes) and feeds them to the fake camera getUserMedia({video}) sees, via
+  // media::AgentVideoBridge. VIDEOSTOP tears it down. Requires the fork's
+  // default --use-fake-video-input-only (real mic untouched).
+  void InjectVideoStart(const std::string& port_str);
+  void InjectVideoStop();
+
   // Resolves the active tab's WebContents via
   // GetLastActiveBrowserWindowInterfaceWithAnyProfile(). May return nullptr.
   content::WebContents* GetTargetWebContents();
@@ -165,6 +174,11 @@ class SendKeysWatcher {
   // constructed and destroyed there via base::SequenceBound.
   class AudioBridgeServer;
   base::SequenceBound<AudioBridgeServer> audio_server_;
+
+  // Owns the localhost WebSocket camera server while a VIDEOSTART..VIDEOSTOP
+  // span is active. Lives on the browser IO thread via base::SequenceBound.
+  class VideoBridgeServer;
+  base::SequenceBound<VideoBridgeServer> video_server_;
 
   base::WeakPtrFactory<SendKeysWatcher> weak_factory_{this};
 };
