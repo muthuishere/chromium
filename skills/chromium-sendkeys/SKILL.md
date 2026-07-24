@@ -149,15 +149,19 @@ SEND (`/mic`, `/cam`) is a browser-global fake device — whichever tab calls ge
 consumes it, so use `selecttab` to control which tab captures. You can't feed two tabs
 different streams from one source.
 
-**PREREQUISITE (mic in):** launch the fork with **`--use-fake-device-for-media-stream`** so the
-page's `getUserMedia()` mic is the fake device the bridge backs. The fork automatically forces the
-audio service **in-process** (`--disable-features=AudioServiceOutOfProcess`, done in
-`chrome_main_delegate.cc`) so the browser-process bridge and the fake capture stream share one
-process — you do NOT pass that yourself.
+**NO LAUNCH FLAG NEEDED (mic in).** The fork defaults **`--use-fake-audio-input-only`** ON (forced
+in `chrome_main_delegate.cc` for the browser process), so `getUserMedia()`'s **microphone is already
+the bridge** — while the **real camera is untouched** (that needs `--use-fake-device-for-media-stream`,
+which the fork does NOT set). The fork also forces the audio service **in-process**
+(`--disable-features=AudioServiceOutOfProcess`) so the browser-process bridge and the fake capture
+stream share one process. You pass none of this — just launch the fork normally (`chromeagent`) and
+issue the spool commands below. Until you arm/stream, the mic is **silent** (not beeping).
 
-**Watcher spool commands** (the raw protocol is the source of truth; media bytes flow over the WS,
-not the spool). BUILT + VERIFIED end-to-end (a 440 Hz int16 sine sent to `/mic` was read back by
-`getUserMedia()` at the exact expected RMS):
+**Command surface = raw spool lines.** `chromesendkeys.cjs` has NO audio verbs — drive the bridge
+by publishing these lines into the spool dir (`$CHROMIUM_SENDKEYS_DIR`, default
+`~/chrome-agent-sendkeys`) via stage-then-rename. BUILT + VERIFIED end-to-end (a 440 Hz int16 sine
+sent to `/mic` read back by `getUserMedia()` at the exact expected RMS; also verified live in the
+running fork by an open port):
 
 ```text
 AUDIOSTART:<port>     # boot the localhost mic WebSocket on 127.0.0.1:<port>, arm the bridge
@@ -165,17 +169,34 @@ PLAYWAV:/abs/a.wav    # one-shot: decode a 16-bit PCM WAV and push it into the m
 AUDIOSTOP             # tear the server down, disarm + flush the bridge
 ```
 
-Then stream to it (binary frames, int16 mono 48 kHz), e.g. from the page or any client:
-`const ws = new WebSocket("ws://127.0.0.1:<port>/mic"); ws.binaryType="arraybuffer"; ws.send(int16buf.buffer);`
+Only ONE audio server runs at a time — a second `AUDIOSTART` replaces (tears down) the first.
 
-> STATUS (2026-07-23): the **mic-in slice is shipped in `main` and verified** — `AUDIOSTART` /
-> `AUDIOSTOP` (the `/mic` WebSocket server via `net::HttpServer`) + `PLAYWAV`, backed by a new
-> `media/audio/agent_audio_bridge.{h,cc}` singleton feeding `media/audio/fake_audio_input_stream.cc`.
-> `net/server/web_socket_encoder.cc` was extended to accept binary frames. STILL TO BUILD (follow-up
-> slices, same pattern): `/tap` (receive tab audio via `audio_loopback_stream_broker`) and the whole
-> VIDEO server (`/cam` send + `/vtap` via `CopyFromSurface`). File shortcut for camera today,
-> launch-flag only: `--use-fake-device-for-media-stream --use-file-for-fake-video-capture=/abs/v.y4m`.
-> Video gotcha: frames must be valid I420/Y4M at a supported size or nothing renders.
+**How to handle it, concretely** (this is exactly how it was driven live):
+
+```bash
+S=~/chrome-agent-sendkeys                       # the spool dir the fork watches
+# 1) arm the mic WebSocket on a port (stage-then-rename; never write directly in the dir)
+printf 'AUDIOSTART:38701\n' > "$S/.stage" && mv "$S/.stage" "$S/mic-on.txt"
+#    confirm it's listening:  nc -z 127.0.0.1 38701  -> open
+# 2) stream binary int16 mono 48 kHz PCM to it from any client (page/CLI/python):
+#      const ws = new WebSocket("ws://127.0.0.1:38701/mic");
+#      ws.binaryType = "arraybuffer"; ws.send(int16buf.buffer);
+# 3) or push a WAV file one-shot (no socket): 
+printf 'PLAYWAV:/abs/voice.wav\n' > "$S/.stage" && mv "$S/.stage" "$S/say.txt"
+# 4) done — disarm:
+printf 'AUDIOSTOP\n' > "$S/.stage" && mv "$S/.stage" "$S/mic-off.txt"
+```
+
+> STATUS (2026-07-24): **shipped in `main` and verified.** `AUDIOSTART`/`AUDIOSTOP` (the `/mic`
+> `net::HttpServer`) + `PLAYWAV`, backed by `media/audio/agent_audio_bridge.{h,cc}` feeding
+> `fake_audio_input_stream.cc`; `net/server/web_socket_encoder.cc` accepts binary frames; the
+> mic-only default (`kUseFakeAudioInputOnly`, `media_switches` + `audio_manager_base.cc`) keeps the
+> real camera. STILL TO BUILD (same pattern, trigger "build the tap and video bridges"): `/tap`
+> (receive tab audio via `audio_loopback_stream_broker` + a binary-ENCODE addition to
+> `net/server/web_socket`) and the VIDEO server (`/cam` send + `/vtap` via `CopyFromSurface`). For a
+> fake CAMERA today (launch-flag only, replaces the real webcam):
+> `--use-fake-device-for-media-stream --use-file-for-fake-video-capture=/abs/v.y4m` — frames must be
+> valid I420/Y4M at a supported size or nothing renders.
 
 Raw protocol (bypassing the CLI, e.g. from another language): stage lines
 into a file, then atomically publish — never write directly into the spool

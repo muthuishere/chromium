@@ -257,11 +257,23 @@ The agent needs to *speak into* a page — feed custom audio to `getUserMedia()`
 (e.g. a Teams call) without a virtual audio driver (no BlackHole). The bridge
 does this entirely in-fork.
 
+**No launch flag (mic-only default).** The fork defaults a fork-local switch
+**`--use-fake-audio-input-only`** ON for the browser process
+(`chrome_main_delegate.cc`), which forces `AudioParameters::AUDIO_FAKE` in
+`AudioManagerBase::MakeAudioInputStream` (the same seam `--disable-audio-input`
+uses) so `getUserMedia()`'s **microphone** is the fake stream — **without**
+faking the camera (that would need `--use-fake-device-for-media-stream`, which
+the fork does NOT set; the video-capture factory
+`create_video_capture_device_factory.cc` stays real). Content-layer device
+*enumeration* also stays real (only the opened stream is fake), so
+`enumerateDevices()` still lists the real mics. `ChooseSource()` routes to the
+bridge when the switch is set or the bridge is armed, silence-filling until
+armed so an idle mic is quiet, not beeping.
+
 **The cross-process problem, and the fix.** `FakeAudioInputStream`
-(`media/audio/fake_audio_input_stream.cc`) is the fake mic Chromium hands to
-`getUserMedia()` when launched with `--use-fake-device-for-media-stream`; its
-`ChooseSource()` normally returns a beep or a `--use-file-for-fake-audio-capture`
-WAV. But that stream runs in the **out-of-process audio service**, while the
+(`media/audio/fake_audio_input_stream.cc`) is the fake mic; its `ChooseSource()`
+normally returns a beep or a `--use-file-for-fake-audio-capture` WAV. But that
+stream runs in the **out-of-process audio service**, while the
 watcher (and its WebSocket server) runs in the **browser process** — a shared
 in-memory buffer can't reach across. So the fork forces the audio service
 **in-process** (`chrome_main_delegate.cc` appends
@@ -294,12 +306,13 @@ fork makes `kOpCodeBinary` fall through like text on decode — additive and saf
 (DevTools only ever sends text). Server→client binary (needed later for `/tap`
 and `/vtap`) will need the encode side too; not added yet.
 
-**Verified end-to-end:** with the fork launched under
-`--use-fake-device-for-media-stream`, `AUDIOSTART:38701` opened the port (closed
-before the command, open after), a page streamed a 440 Hz int16 sine to `/mic`,
-and `getUserMedia()` + an `AnalyserNode` read it back at RMS 0.259 — exactly
-`peak/√2` for the injected amplitude, with the WebSocket never closing (binary
-frames accepted).
+**Verified end-to-end:** with the fork launched **with no media flag at all**,
+`AUDIOSTART:38701` opened the port (closed before the command, open after), a
+page streamed a 440 Hz int16 sine to `/mic`, and `getUserMedia()` + an
+`AnalyserNode` read it back at RMS 0.259 — exactly `peak/√2` for the injected
+amplitude, with the WebSocket never closing (binary frames accepted).
+`enumerateDevices()` still listed the real mics and a real (non-fake) video
+device, confirming the camera path is untouched.
 
 **Still to build (same pattern):** `/tap` (receive a tab's output PCM via
 `content/browser/media/audio_loopback_stream_broker`) and the independent VIDEO
@@ -406,8 +419,10 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 | `media/audio/fake_audio_input_stream.cc`      | **Mic bridge:** `ChooseSource()` returns a bridge-backed source when `AgentAudioBridge::input_enabled()` |
 | `media/audio/BUILD.gn`                          | **Mic bridge:** added `agent_audio_bridge.{cc,h}` to the `audio` target |
 | `net/server/web_socket_encoder.cc`             | **Mic bridge:** accept binary WebSocket frames on decode (was `FRAME_ERROR`) so raw PCM can flow |
-| `chrome/app/chrome_main_delegate.cc`          | **Mic bridge:** forces the audio service in-process (`--disable-features=AudioServiceOutOfProcess`) so the browser-process bridge reaches the fake mic |
+| `chrome/app/chrome_main_delegate.cc`          | **Mic bridge:** forces the audio service in-process (`--disable-features=AudioServiceOutOfProcess`); **also defaults `--use-fake-audio-input-only` ON** so the mic is the bridge with no launch flag |
 | `chrome/browser/sendkeys_watcher.{cc,h}` | **Mic bridge:** `AUDIOSTART`/`AUDIOSTOP` (a localhost `net::HttpServer` on `/mic`) + `PLAYWAV` |
+| `media/base/media_switches.{cc,h}` (new switch) | **Mic-only default:** declares `kUseFakeAudioInputOnly` ("use-fake-audio-input-only") — fake the mic, not the camera |
+| `media/audio/audio_manager_base.cc`           | **Mic-only default:** `MakeAudioInputStream` forces `AUDIO_FAKE` when that switch is set (same seam `kDisableAudioInput` uses) |
 
 ## Security relaxations (agent build — CORS + CSP off)
 
