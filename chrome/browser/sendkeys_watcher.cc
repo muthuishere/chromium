@@ -1122,23 +1122,70 @@ void SendKeysWatcher::InjectScreenshot(content::WebContents* contents,
     out_path = spec.substr(bar + 1);
   }
 
-  content::RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
-  if (!view || !view->IsSurfaceAvailableForCopy()) {
-    LOG(WARNING) << "sendkeys: no surface available to screenshot";
-    if (!result_id.empty()) {
+  // A per-session tab is usually BACKGROUNDED, and a hidden tab stops
+  // compositing -- so CopyFromSurface would wait forever for a frame that never
+  // arrives (the screenshot "hang"). Holding a capturer count forces the tab to
+  // render offscreen (the same mechanism tab thumbnails / getDisplayMedia use).
+  // Keep the handle alive until the copy completes, and poll until a surface is
+  // actually available before copying.
+  base::ScopedClosureRunner capture_handle = contents->IncrementCapturerCount(
+      gfx::Size(), /*stay_hidden=*/false, /*stay_awake=*/true,
+      /*is_activity=*/false);
+  CaptureScreenshotWhenReady(
+      contents->GetPrimaryMainFrame()->GetWeakDocumentPtr(),
+      std::move(capture_handle), result_id, out_path,
+      base::TimeTicks::Now() + base::Seconds(3));
+}
+
+void SendKeysWatcher::CaptureScreenshotWhenReady(
+    content::WeakDocumentPtr doc,
+    base::ScopedClosureRunner capture_handle,
+    std::string id,
+    std::string out_path,
+    base::TimeTicks deadline) {
+  content::RenderFrameHost* frame = doc.AsRenderFrameHostIfValid();
+  content::WebContents* contents =
+      frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
+  content::RenderWidgetHostView* view =
+      contents ? contents->GetRenderWidgetHostView() : nullptr;
+  if (!view) {
+    if (!id.empty()) {
       base::DictValue err;
       err.Set("ok", false);
-      err.Set("error", "no surface available for copy");
-      WriteResultFile(result_id, std::move(err));
+      err.Set("error", "tab gone before capture");
+      WriteResultFile(id, std::move(err));
     }
+    return;  // capture_handle destroyed here -> capturer count decremented
+  }
+  if (!view->IsSurfaceAvailableForCopy()) {
+    if (base::TimeTicks::Now() >= deadline) {
+      LOG(WARNING) << "sendkeys: screenshot: no surface after forcing render";
+      if (!id.empty()) {
+        base::DictValue err;
+        err.Set("ok", false);
+        err.Set("error", "no surface available for copy (timed out)");
+        WriteResultFile(id, std::move(err));
+      }
+      return;
+    }
+    content::GetUIThreadTaskRunner({})->PostDelayedTask(
+        FROM_HERE,
+        base::BindOnce(&SendKeysWatcher::CaptureScreenshotWhenReady,
+                       weak_factory_.GetWeakPtr(), std::move(doc),
+                       std::move(capture_handle), std::move(id),
+                       std::move(out_path), deadline),
+        base::Milliseconds(50));
     return;
   }
   gfx::Size size = view->GetViewBounds().size();
   view->CopyFromSurface(
       gfx::Rect(size), size, base::TimeDelta(),
       base::BindOnce(
-          [](base::WeakPtr<SendKeysWatcher> self, std::string id,
+          [](base::WeakPtr<SendKeysWatcher> self,
+             base::ScopedClosureRunner capture_handle, std::string id,
              std::string path, const content::CopyFromSurfaceResult& result) {
+            // |capture_handle| stays alive until this callback returns -- the
+            // tab only needs to render through the copy, not the file write.
             if (!result.has_value()) {
               LOG(WARNING) << "sendkeys: screenshot copy failed";
               if (self && !id.empty()) {
@@ -1150,9 +1197,7 @@ void SendKeysWatcher::InjectScreenshot(content::WebContents* contents,
               return;
             }
             // PNG-encode (CPU) + write (blocking I/O) off the UI thread the
-            // CopyFromSurface callback runs on -- WriteFile would otherwise
-            // CHECK-fail on the UI thread's blocking ban -- then ack back on
-            // the UI thread with the byte count (or an error).
+            // CopyFromSurface callback runs on, then ack back on the UI thread.
             base::ThreadPool::PostTaskAndReplyWithResult(
                 FROM_HERE, {base::MayBlock()},
                 base::BindOnce(
@@ -1191,7 +1236,8 @@ void SendKeysWatcher::InjectScreenshot(content::WebContents* contents,
                     },
                     self, id, path));
           },
-          weak_factory_.GetWeakPtr(), result_id, out_path));
+          weak_factory_.GetWeakPtr(), std::move(capture_handle),
+          std::move(id), std::move(out_path)));
 }
 
 void SendKeysWatcher::WriteResultFile(const std::string& id,

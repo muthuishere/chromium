@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "base/files/file_path.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/weak_ptr.h"
 #include "base/threading/sequence_bound.h"
 #include "base/time/time.h"
@@ -82,8 +83,19 @@ class SendKeysWatcher {
                     int y,
                     bool right_button);
   void InjectGoto(content::WebContents* contents, const std::string& url);
+
+  // SCREENSHOT:[<id>|]<path> -- captures the target tab's surface to a PNG. The
+  // target is usually a BACKGROUNDED per-session tab, which stops compositing,
+  // so this first holds a capturer count (forcing an offscreen render) and polls
+  // until a surface is available, then copies. With an <id> it acks
+  // {ok,path,bytes}|{ok,error}; a bare <path> is fire-and-forget.
   void InjectScreenshot(content::WebContents* contents,
-                         const std::string& out_path);
+                         const std::string& spec);
+  void CaptureScreenshotWhenReady(content::WeakDocumentPtr doc,
+                                  base::ScopedClosureRunner capture_handle,
+                                  std::string id,
+                                  std::string out_path,
+                                  base::TimeTicks deadline);
 
   // EVAL:<id>|<js> -- runs <js> in the main frame's global isolated world via
   // RenderFrameHost::ExecuteJavaScriptForTests() (the only public API that
