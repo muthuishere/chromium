@@ -142,6 +142,20 @@ function teardown() {
     const s2 = await wait('s2', 15000); await sleep(300);
     ok('SCREENSHOT captures a BACKGROUND tab (no hang)', s2.ok === true && s2.bytes > 1000 && validPng(bg), JSON.stringify(s2));
 
+    // T9 CSP: on a strict-script-src page, a raw eval() is blocked but the
+    // opt-in b64: path (source injected directly, no eval) runs. This is the
+    // ADR 0001 strict-CSP fix that unblocks DOM recipes on LinkedIn et al.
+    const cspUrl = 'data:text/html,' + encodeURIComponent(
+      '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'"><body>csp');
+    send(`TAB:${tabId}|GOTO:${cspUrl}`); await sleep(1600);
+    send(`TAB:${tabId}|EVALASYNC:c1|return eval('6*7');`);
+    const c1 = await wait('c1');
+    ok('raw eval() is blocked by page CSP (expected)', c1.ok === false && /eval|csp|unsafe/i.test(c1.error || ''), JSON.stringify(c1));
+    const b64 = Buffer.from('return 6*7;').toString('base64');
+    send(`TAB:${tabId}|EVALASYNC:c2|b64:${b64}`);
+    const c2 = await wait('c2');
+    ok('EVALASYNC b64: (opt-in) bypasses CSP, runs source directly (=42)', c2.ok === true && c2.value === 42, JSON.stringify(c2));
+
     const failed = results.filter(r => !r.pass);
     console.log(`\n=== ${results.length - failed.length}/${results.length} passed ===`);
     teardown();

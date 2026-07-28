@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "base/containers/span.h"
+#include "base/base64.h"
 #include "base/environment.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
@@ -1408,6 +1409,24 @@ void SendKeysWatcher::InjectEvalAsync(content::RenderFrameHost* frame,
   if (!frame || !SplitOnFirst(spec, '|', &id, &body)) {
     LOG(WARNING) << "sendkeys: malformed EVALASYNC: line, expected id|body";
     return;
+  }
+  // Opt-in CSP-safe path: a "b64:<base64>" body is decoded and its SOURCE is
+  // interpolated straight into the injected main-world script below -- no
+  // runtime eval()/Function(), so a page's strict script-src (LinkedIn et al.)
+  // cannot block it. Unmarked bodies are left exactly as sent (the existing
+  // path, incl. the client's eval(atob(...)) form), so every other caller in the
+  // browser stays on the unchanged behavior. See ADR 0001, strict-CSP follow-up.
+  if (body.rfind("b64:", 0) == 0) {
+    std::string decoded;
+    if (!base::Base64Decode(std::string_view(body).substr(4), &decoded)) {
+      LOG(WARNING) << "sendkeys: EVALASYNC: bad base64 body";
+      base::DictValue err;
+      err.Set("ok", false);
+      err.Set("error", "bad base64 body");
+      WriteResultFile(id, std::move(err));
+      return;
+    }
+    body = std::move(decoded);
   }
   // ExecuteJavaScriptForTests() cannot await a Promise returned by the script --
   // the callback would get the unresolved Promise, not its value. So run <body>
