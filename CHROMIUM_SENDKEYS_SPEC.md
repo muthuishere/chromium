@@ -350,6 +350,65 @@ frames with motion; the real camera path is untouched when the switch isn't set.
 frames via the `CopyFromSurface` primitive the `SCREENSHOT` command already uses).
 Both use the binary WS **encode** foundation that is already in place.
 
+## Extension: per-tab targeting (UUID registry) + native eval-await + screenshot acks — BUILT + VERIFIED 2026-07-28
+
+Three related changes landed together to make multi-tab, multi-agent driving
+race-free. They resolve the old "last-active only" limitation and the ADR 0001
+about:blank cross-tab race.
+
+### Per-tab UUID registry: `TAB:<tabId>|<command line>`
+
+Every tab now carries a stable UUID (minted when it's created and stored on the
+tab), and any command line can be prefixed with `TAB:<tabId>|` to pin it to that
+specific tab regardless of window focus or stray tabs. The prefix is accepted on
+`GOTO`/`EVAL`/`EVALASYNC`/`CLICK`/`TEXT`/`KEY`/`SCREENSHOT`/`WAITFOR`/`NETLOG`.
+
+- A **known** tabId routes the inner command to that tab's `WebContents`
+  directly, bypassing `GetActiveTabInterface()`.
+- A **supplied-but-unknown** tabId writes `{"ok":false,"error":"unknown tabId"}`
+  to the inner command's result id and **never falls back to last-active**. This
+  is the fix for the old about:blank cross-tab race (ADR 0001): a command aimed
+  at a tab that has gone away fails loudly instead of silently landing in
+  whatever tab happens to be active.
+- **No prefix** → the existing last-active default (`GetLastActiveBrowserWindowInterfaceWithAnyProfile()`
+  → `GetActiveTabInterface()`), so all pre-existing single-tab usage is
+  unchanged (back-compat).
+
+`NEWTAB:<resultId>|<url>` now **acks** `{"ok":true,"tabId":"<uuid>"}` so a
+producer learns the UUID of the tab it just opened and can address it forever
+after. The bare `NEWTAB:<url>` form is still fire-and-forget. `LISTTABS:<id>`
+now returns, for **every tab across all windows**, its `tabId` plus `window`,
+`index`, `title`, `url`, and `active`.
+
+### Native eval-await: `EVALASYNC:<id>|<body>`
+
+`EVALASYNC:<id>|<body>` runs `<body>` as an **async function body** — it may
+`await` and `return` — and acks `{"ok":true,"value":<result>}` or
+`{"ok":false,"error":<message>}`. This is native eval-await in the fork: because
+`ExecuteJavaScriptForTests()` uses `resolve_promises=false` (it cannot await a
+returned Promise — see the EVAL caveat / bug #3 in the build log), the fork
+wraps the body in an async IIFE that stashes its settled result on a page global,
+then polls that global until it resolves and returns the value. This replaces
+the old client-side base64 `eval(atob(...))` + window-token stash+poll dance,
+which is now unnecessary. Synchronous `EVAL:<id>|<expr>` (expression completion
+value, no await) is unchanged.
+
+### Screenshot: always acks, and captures background tabs
+
+`SCREENSHOT:<id>|<path>` now **acks on every path**: `{"ok":true,"path":<path>,"bytes":<n>}`
+on success or `{"ok":false,"error":<message>}` on failure. Previously a failed
+capture wrote no result at all and hung the client (ADR 0001 §3). The bare
+`SCREENSHOT:<path>` form is still fire-and-forget.
+
+It also now captures **background (hidden) tabs**: the capture holds a capturer
+count to force an offscreen render, so a per-session hidden tab no longer hangs
+the capture waiting for a visible surface.
+
+> **WARNING — do not screenshot into the spool dir.** The watcher scans its
+> spool directory and deletes stray files, so a screenshot written *inside* the
+> spool dir races the watcher and can vanish. Write screenshots to `/tmp` or any
+> path outside the spool dir.
+
 ## Protocol summary (quick reference)
 
 | Env var                  | Effect                                                      |
@@ -363,8 +422,12 @@ Both use the binary WS **encode** foundation that is already in place.
 | `CLICK:<x>,<y>`          | Left mousedown+mouseup at widget-relative coordinates              |
 | `RIGHTCLICK:<x>,<y>`     | Right mousedown+mouseup (opens the native context menu — see below)|
 | `GOTO:<url>`             | Navigates the active tab's main frame                              |
-| `SCREENSHOT:<path>`      | PNG-encodes the current surface to `<path>`                        |
-| `EVAL:<id>\|<js>`         | Runs `<js>`, writes `results/<id>.json` (DOM read/write, HTTP via fetch) |
+| `TAB:<tabId>\|<line>`     | Pins `<line>` to the tab carrying UUID `<tabId>` (unknown id → `{"ok":false,"error":"unknown tabId"}`, never last-active); prefixable on GOTO/EVAL/EVALASYNC/CLICK/TEXT/KEY/SCREENSHOT/WAITFOR/NETLOG |
+| `SCREENSHOT:<id>\|<path>` | PNG-encodes the surface to `<path>`; **acks** `{"ok":true,"path","bytes"}`/`{"ok":false,"error"}`; captures **background** tabs. Bare `SCREENSHOT:<path>` = fire-and-forget. Do NOT write inside the spool dir |
+| `EVAL:<id>\|<js>`         | Runs `<js>` (single expression, no await), writes `results/<id>.json` (DOM read/write, HTTP via sync XHR) |
+| `EVALASYNC:<id>\|<body>`  | Runs `<body>` as an async function body (may `await`/`return`); acks `{"ok":true,"value":...}`/`{"ok":false,"error":...}` — native eval-await |
+| `NEWTAB:<id>\|<url>`      | Opens a foreground tab; **acks** `{"ok":true,"tabId":"<uuid>"}`. Bare `NEWTAB:<url>` = fire-and-forget |
+| `LISTTABS:<id>`          | Returns each tab across ALL windows: `tabId`,`window`,`index`,`title`,`url`,`active` |
 | `WAITFOR:<ms>\|<id>\|<js>`| Polls `<js>` every 100ms until truthy/timeout, writes `results/<id>.json` |
 | `NETLOG:START`           | Starts recording resource loads on the active tab                    |
 | `NETLOG:STOP:<path>`     | Stops recording, writes the JSON array to `<path>`                    |
@@ -398,9 +461,11 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 - **`RIGHTCLICK:` opens a real native context menu (a separate Views
   widget/surface).** This spike doesn't drive that menu — no way yet to
   click a context-menu item or dismiss it programmatically.
-- **Single tab/window targeting.** `GetLastActiveBrowserWindowInterfaceWithAnyProfile()`
-  picks whichever browser window was last activated; there's no way to
-  target a specific tab/window by id.
+- **Per-tab targeting shipped.** No-prefix commands still default to the
+  last-active tab (`GetLastActiveBrowserWindowInterfaceWithAnyProfile()` →
+  `GetActiveTabInterface()`), but any command can now be pinned to a specific
+  tab by UUID via the `TAB:<tabId>|` prefix (see the per-tab targeting section
+  above). An unknown tabId fails loudly rather than falling back to last-active.
 - **No IME/composition support.** Typing goes through raw keydown/char/keyup
   events, not `ImeCommitText` — fine for direct-input fields, not for
   IME-composed input methods.
@@ -446,7 +511,7 @@ dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
 | `services/network/public/cpp/parsed_headers.cc`   | **Security relaxation:** skip parsing `Content-Security-Policy` response headers (header CSP not enforced) |
 | `components/permissions/permission_context_base.cc` | **Security relaxation:** `DecidePermission()` auto-grants every permission (no prompt) — see below |
 | `components/os_crypt/common/keychain_password_mac.mm` | **Keychain-free profile:** `GetPassword()` reads the OSCrypt key from a file (`$CHROMIUM_AGENT_OSCRYPT_KEY_FILE` / `~/.config/chromium-agent/oscrypt.key`) before falling back to the macOS Keychain — no prompt, and decrypts a profile copied from another browser when seeded with its key |
-| `chrome/browser/sendkeys_watcher.{cc,h}` | Tab/window commands `NEWTAB`/`NEWWINDOW`/`CLOSETAB`/`SELECTTAB`/`LISTTABS` (act on the last-active window; `GOTO`/`EVAL` still target the active tab) |
+| `chrome/browser/sendkeys_watcher.{cc,h}` | Tab/window commands `NEWTAB`/`NEWWINDOW`/`CLOSETAB`/`SELECTTAB`/`LISTTABS`; **per-tab UUID registry + `TAB:<tabId>\|` prefix** (pin any command to a tab by UUID; unknown id fails loudly, never last-active); `NEWTAB`/`LISTTABS` ack a `tabId`; **`EVALASYNC`** native eval-await; `SCREENSHOT` now acks + captures background tabs |
 | `media/audio/agent_audio_bridge.{cc,h}` (new) | **Mic bridge:** process-global `AgentAudioBridge` singleton — a mono/48 kHz ring buffer fed by the browser process, drained by the fake mic |
 | `media/audio/fake_audio_input_stream.cc`      | **Mic bridge:** `ChooseSource()` returns a bridge-backed source when `AgentAudioBridge::input_enabled()` |
 | `media/audio/BUILD.gn`                          | **Mic bridge:** added `agent_audio_bridge.{cc,h}` to the `audio` target |

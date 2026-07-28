@@ -113,12 +113,13 @@ node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys http "https://example.com/
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys waitfor 5000 "!!document.querySelector('.loaded')"
 
 # Tab / window management (act on the last-active browser window).
-# GOTO/EVAL/etc. always target the ACTIVE tab, so selecttab + goto = full control.
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys newtab "https://example.com"  # new foreground tab
+# GOTO/EVAL/etc. default to the ACTIVE tab; to target a SPECIFIC tab by UUID,
+# prefix any command line with TAB:<tabId>| (see the per-tab targeting note below).
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys newtab "https://example.com"  # new foreground tab; acks {"ok":true,"tabId":"<uuid>"}
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys newwindow "https://x.com"     # new window
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys selecttab 2                    # activate tab by index
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys closetab 2                     # close tab by index (omit = active)
-node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys listtabs   # -> {"ok":true,"value":[{index,title,url,active}]}
+node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys listtabs   # -> [{tabId,window,index,title,url,active}] across ALL windows
 
 # Network log (resource-load-completion only, not a live interceptor):
 node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys netlog start
@@ -128,6 +129,22 @@ node chromesendkeys.cjs --dir ~/chrome-agent-sendkeys netlog stop /tmp/netlog.js
 
 Or set `--dir` once via `export CHROMIUM_SENDKEYS_DIR=~/chrome-agent-sendkeys`
 and drop `--dir` from every call.
+
+**Per-tab targeting (`TAB:<tabId>|`).** Every tab carries a stable UUID. Prefix
+any command line with `TAB:<tabId>|` to pin it to that tab regardless of window
+focus or stray tabs — prefixable on `GOTO`/`EVAL`/`EVALASYNC`/`CLICK`/`TEXT`/
+`KEY`/`SCREENSHOT`/`WAITFOR`/`NETLOG`. Learn a tab's UUID from `newtab`'s ack
+(`{"ok":true,"tabId":"<uuid>"}`) or `listtabs` (each row has `tabId`). An
+**unknown** tabId writes `{"ok":false,"error":"unknown tabId"}` and never falls
+back to the last-active tab (this is what makes multi-tab driving race-free — no
+prefix keeps the old last-active default). Send it as a raw line, e.g.
+`node chromesendkeys.cjs --dir "$S" send "TAB:<uuid>|GOTO:https://example.com"`.
+
+**`EVALASYNC:<id>|<body>`** runs an async function body natively in the fork —
+it may `await` and `return`, and acks `{"ok":true,"value":...}` /
+`{"ok":false,"error":...}`. Use it instead of `eval` whenever you need to await
+(e.g. `await fetch(...)`); plain `eval` is single-expression, no await. Send via
+`send "EVALASYNC:<id>|return (await fetch('/api')).status"`.
 
 ## 3a. Audio & video in / out — raw media over WebSocket (no virtual driver)
 
@@ -239,9 +256,10 @@ appends inside the watched directory.
 
 ## 3b. Command catalog — every command + when an agent reaches for it
 
-The complete surface (17 commands). `verb` = the `chromesendkeys.cjs` subcommand;
-`SPOOL:` = the raw line it writes (also usable via `send <line>` or stage-then-rename).
-Commands with a `results/<id>.json` return value are marked **←reads back**.
+The complete surface. `verb` = the `chromesendkeys.cjs` subcommand (rows marked
+*(raw)* have no dedicated verb — send the spool line via `send <line>` or
+stage-then-rename); `SPOOL:` = the raw line written. Commands with a
+`results/<id>.json` return value are marked **←reads back**.
 
 | verb (CLI) | raw spool line | what it does | WHEN an agent uses it |
 |---|---|---|---|
@@ -250,16 +268,18 @@ Commands with a `results/<id>.json` return value are marked **←reads back**.
 | `key <chord>` | `KEY:<chord>` | one key chord: `enter`, `ctrl+a`, `cmd+shift+t`, `tab`… | submit a form, trigger a shortcut, move focus — one chord per line |
 | `click <x> <y>` | `CLICK:<x>,<y>` | left mousedown+up at widget-relative px | click something you located by coordinates (from a screenshot/eval rect) |
 | `rightclick <x> <y>` | `RIGHTCLICK:<x>,<y>` | right click → opens the **native** context menu | only when you actually need the OS context menu (it's not a DOM menu) |
-| `eval <js>` | `EVAL:<id>\|<js>` | run JS in the page's main frame; JSON result **←reads back** | the workhorse: read/mutate DOM, click by selector (`el.click()`), or `await fetch()` in-page. Prefer this over blind x/y clicks |
+| `eval <js>` | `EVAL:<id>\|<js>` | run a single JS expression in the page's main frame (no await); JSON result **←reads back** | read/mutate DOM, click by selector (`el.click()`). Prefer this over blind x/y clicks. Use `evalAsync` when you need to `await` |
+| *(raw)* | `EVALASYNC:<id>\|<body>` | run `<body>` as an **async function body** (may `await`/`return`); acks `{ok,value}`/`{ok,error}` **←reads back** | native eval-await: `await fetch()` in-page, or any async DOM wait. Replaces the old base64 `eval(atob())` async hack |
 | `getdom` | `EVAL:<id>\|documentElement.outerHTML` | dump the DOM **←reads back** | inspect page structure before deciding what to click/type |
-| `http <url>` | `EVAL:<id>\|await fetch(...)` | HTTP request **from inside the page** (its cookies/origin) **←reads back** | call an API as the logged-in page — no separate auth |
+| `http <url>` | `EVAL:<id>\|<sync-XHR>` | HTTP request **from inside the page** (its cookies/origin) **←reads back** | call an API as the logged-in page — no separate auth |
 | `waitfor <ms> <js>` | `WAITFOR:<ms>\|<id>\|<js>` | poll a JS predicate every 100ms until truthy or timeout **←reads back** | wait for SPA content/navigation to settle before the next step (don't sleep) |
-| `newtab [url]` | `NEWTAB:<url>` | open a foreground tab | parallel context, or open a link without losing the current tab |
+| *(raw)* | `TAB:<tabId>\|<line>` | pin `<line>` to the tab with UUID `<tabId>` (unknown id → `{ok:false,error:"unknown tabId"}`, never last-active) | race-free multi-tab driving: target a specific tab regardless of focus. Prefix on GOTO/EVAL/EVALASYNC/CLICK/TEXT/KEY/SCREENSHOT/WAITFOR/NETLOG |
+| `newtab [url]` | `NEWTAB:<id>\|<url>` | open a foreground tab; **acks** `{ok:true,tabId}` **←reads back** | parallel context; capture the returned `tabId` to address the tab later. Bare `NEWTAB:<url>` = fire-and-forget |
 | `newwindow [url]` | `NEWWINDOW:<url>` | open a new window | separate window when tabs won't do |
-| `selecttab <i>` | `SELECTTAB:<i>` | activate tab by index | **GOTO/EVAL/type always hit the ACTIVE tab**, so selecttab + action = target any tab |
+| `selecttab <i>` | `SELECTTAB:<i>` | activate tab by index | with no `TAB:` prefix, GOTO/EVAL/type hit the ACTIVE tab, so selecttab + action = target any tab (or use `TAB:<tabId>\|`) |
 | `closetab [i]` | `CLOSETAB:<i>` | close tab by index (omit = active) | clean up; closing the active tab is safe (no crash) |
-| `listtabs` | `LISTTABS:<id>` | array of `{index,title,url,active}` **←reads back** | discover what's open before selecttab/closetab |
-| `screenshot <path>` | `SCREENSHOT:<path>` | PNG of the current surface to `<path>` | capture visual state to reason over, or to find click coordinates |
+| `listtabs` | `LISTTABS:<id>` | array of `{tabId,window,index,title,url,active}` across ALL windows **←reads back** | discover what's open + each tab's UUID before selecttab/closetab or a `TAB:` prefix |
+| `screenshot <path>` | `SCREENSHOT:<id>\|<path>` | PNG to `<path>`; **acks** `{ok,path,bytes}`/`{ok,error}`; captures **background** tabs **←reads back** | capture visual state or find click coordinates. Bare `SCREENSHOT:<path>` = fire-and-forget. **Never write inside the spool dir** — the watcher deletes stray files; use `/tmp` |
 | `netlog start` | `NETLOG:START` | begin recording resource-load completions | before driving a flow you want the network trace of |
 | `netlog stop <path>` | `NETLOG:STOP:<path>` | stop, write JSON array of loads to `<path>` | after the flow — completion records only (no headers/body; not a live interceptor) |
 | `send AUDIOSTART:<port>` | `AUDIOSTART:<port>` | open the `/mic` WebSocket, arm the mic bridge | inject microphone audio into a call/page — then stream int16 mono 48 kHz to `ws://127.0.0.1:<port>/mic` |
@@ -271,8 +291,8 @@ Commands with a `results/<id>.json` return value are marked **←reads back**.
 Rules of thumb for the agent:
 - **Prefer `eval` over `click x y`** when a selector exists — coordinates are brittle, `el.click()`/setting `.value` is not. Use screenshots + coordinates only when there's no stable selector (canvas, native UI).
 - **Always `waitfor` after a navigation or an action that loads content** instead of guessing a delay.
-- **`selecttab` before acting on a non-active tab** — every action command targets the active tab only.
-- **Read-back commands** (`eval`/`getdom`/`http`/`waitfor`/`listtabs`) block in the CLI and print JSON; the raw spool writes `results/<id>.json` (poll + delete it yourself if bypassing the CLI).
+- **Target a specific tab** either by `selecttab <i>` first (an un-prefixed command hits the active tab), or — race-free — by prefixing `TAB:<tabId>|` on the command itself (get the `tabId` from `newtab`'s ack or `listtabs`). Prefer `TAB:` when multiple agents/tabs are in play.
+- **Read-back commands** (`eval`/`evalAsync`/`getdom`/`http`/`waitfor`/`listtabs`, plus `newtab`/`screenshot` acks) block in the CLI and print JSON; the raw spool writes `results/<id>.json` (poll + delete it yourself if bypassing the CLI).
 - **Audio and video need no launch flag** — mic and camera are both faked by default (silent mic / black camera until you inject). `send AUDIOSTART:<port>` then stream int16 PCM to `/mic`; `send VIDEOSTART:<port>` then stream `[w][h][I420]` frames to `/cam`.
 
 ## 4. Verify delivery
