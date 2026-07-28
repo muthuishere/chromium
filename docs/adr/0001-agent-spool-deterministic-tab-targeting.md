@@ -32,6 +32,48 @@ adversarial-focus and two-tab cases below) plus `chrome-agent-media-selftest.cjs
 
 ---
 
+## Follow-up (2026-07-28, second session) — tab fix VERIFIED, a 2nd blocker surfaced (strict-CSP eval)
+
+The tab-targeting fix is **confirmed working end to end**: `chrome-agent goto <linkedin post>` on a
+session's pinned tab, then `chrome-agent status`, now reports the *correct* post URL (previously the
+recipe's eval saw `about:blank`). The `about:blank` cross-tab race is gone. 🎉
+
+But the `linkedin:comment` recipe then fails on a **different, unrelated** cause — LinkedIn's strict
+Content-Security-Policy:
+```
+{"error":"EvalError: Evaluating a string as JavaScript violates the following Content Security
+Policy directive because 'unsafe-eval' is not an allowed source of script: script-src
+'report-sample' 'strict-dynamic' 'nonce-…'"}
+```
+Root cause: the `chrome-agent` client's `evalAsync()` wraps the recipe body and runs it as
+`return eval(atob('<base64>'))` (see `~/.claude/skills/chrome-agent/chrome-agent` `evalAsync()` →
+`cjt evalasync "return eval(atob('…'))"`). On a strict-CSP page (LinkedIn, and many modern SPAs) the
+runtime `eval()` call is blocked, even though the *outer* injected main-world script is CSP-exempt —
+CSP `unsafe-eval` is checked at the `eval()` call site. So DOM-driven recipes (`linkedin:comment`,
+replies, any `evalAsync`-based recipe) can't run their body on strict-CSP sites. Proactive
+`linkedin:post` / `x:post` are unaffected — they're voyager/DraftJS **fetch**-API replay, no `eval`.
+
+**Fix direction (fork or client):**
+- Have the fork's `EVALASYNC` verb execute the provided code **directly as a main-world injected
+  script** (via the same `ExecuteJavaScript`/world-injection path the outer wrapper already uses),
+  so no runtime `eval()`/`Function()` is invoked — main-world browser-injected script is not subject
+  to the page's `script-src`. Then the client can stop base64-wrapping in `eval(atob())`.
+- Or, client-side: pass the decoded function body to the fork verb as the script to run, instead of
+  a string the page must `eval()` itself.
+- Acceptance: `chrome-agent recipe linkedin:comment` on a real (CSP-strict) LinkedIn post opens the
+  comment editor and posts, no `EvalError`.
+
+**RESOLVED 2026-07-28 (opt-in, not for all).** The fork's `EVALASYNC` now accepts a `b64:<base64>`
+body: it base64-decodes and interpolates the **source directly** into its main-world injected
+script — no runtime `eval()`/`Function()`, so a page's `script-src` cannot block it. Unmarked
+bodies are unchanged, so every other caller stays on the existing path. The client exposes this as
+**`evalwithcsp`** (CSP-safe) vs **`evalwithoutcsp`** (the existing `eval(atob())` path, still the
+default), and `recipe <key> <opts> csp` opts a DOM recipe in per call. Verified end-to-end on a
+strict-CSP page: `evalwithoutcsp 'return 6*7'` → the documented `EvalError`, `evalwithcsp 'return
+6*7'` → `42`; plus a committed self-test case (raw eval CSP-blocked; `b64:` path = 42). The
+navigate-then-eval race below is mitigated by tabId pinning + the client's post-`goto` settle; a
+proper load-commit ack remains a possible future enhancement.
+
 ## Context — the symptom
 
 `chrome-agent` recipes that need more than one step against a page (navigate → find element →
