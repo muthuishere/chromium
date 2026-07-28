@@ -109,6 +109,19 @@ class SendKeysWatcher {
                     std::string js,
                     base::TimeTicks deadline);
 
+  // EVALASYNC:<id>|<body> -- runs <body> as an async function body (may use
+  // await and return), stashes the settled result on a per-id page global, and
+  // polls it from C++ (ExecuteJavaScriptForTests cannot await a returned
+  // Promise). Writes {"ok":true,"value":...} or {"ok":false,"error":...} to
+  // results/<id>.json. This is the native home of what the JS client used to do
+  // by hand (evalAsync's window-token stash + poll).
+  void InjectEvalAsync(content::RenderFrameHost* frame,
+                       const std::string& spec);
+  void PollEvalAsync(content::WeakDocumentPtr doc,
+                     std::string id,
+                     std::string key,
+                     base::TimeTicks deadline);
+
   // NETLOG:START -- attaches a WebContentsObserver to the target WebContents
   // that records every ResourceLoadComplete (url, method, mime type, status,
   // net error) via the public content::WebContentsObserver API -- no CDP

@@ -881,6 +881,8 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     InjectGoto(contents, rest);
   } else if (ConsumePrefix(line, "SCREENSHOT:", &rest)) {
     InjectScreenshot(contents, rest);
+  } else if (ConsumePrefix(line, "EVALASYNC:", &rest)) {
+    InjectEvalAsync(contents->GetPrimaryMainFrame(), rest);
   } else if (ConsumePrefix(line, "EVAL:", &rest)) {
     InjectEval(contents->GetPrimaryMainFrame(), rest);
   } else if (ConsumePrefix(line, "WAITFOR:", &rest)) {
@@ -1108,40 +1110,88 @@ void SendKeysWatcher::InjectListTabs(const std::string& id) {
 }
 
 void SendKeysWatcher::InjectScreenshot(content::WebContents* contents,
-                                       const std::string& out_path) {
+                                       const std::string& spec) {
+  // Optional "<resultId>|" prefix requests an ack, so the client can verify the
+  // PNG landed instead of polling a file that (on any failure) never appears --
+  // the ADR 0001 screenshot bug. A bare "<path>" stays fire-and-forget.
+  std::string result_id;
+  std::string out_path = spec;
+  size_t bar = spec.find('|');
+  if (bar != std::string::npos) {
+    result_id = spec.substr(0, bar);
+    out_path = spec.substr(bar + 1);
+  }
+
   content::RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
   if (!view || !view->IsSurfaceAvailableForCopy()) {
     LOG(WARNING) << "sendkeys: no surface available to screenshot";
+    if (!result_id.empty()) {
+      base::DictValue err;
+      err.Set("ok", false);
+      err.Set("error", "no surface available for copy");
+      WriteResultFile(result_id, std::move(err));
+    }
     return;
   }
   gfx::Size size = view->GetViewBounds().size();
   view->CopyFromSurface(
       gfx::Rect(size), size, base::TimeDelta(),
       base::BindOnce(
-          [](std::string path, const content::CopyFromSurfaceResult& result) {
+          [](base::WeakPtr<SendKeysWatcher> self, std::string id,
+             std::string path, const content::CopyFromSurfaceResult& result) {
             if (!result.has_value()) {
               LOG(WARNING) << "sendkeys: screenshot copy failed";
+              if (self && !id.empty()) {
+                base::DictValue err;
+                err.Set("ok", false);
+                err.Set("error", "surface copy failed");
+                self->WriteResultFile(id, std::move(err));
+              }
               return;
             }
             // PNG-encode (CPU) + write (blocking I/O) off the UI thread the
             // CopyFromSurface callback runs on -- WriteFile would otherwise
-            // CHECK-fail on the UI thread's blocking ban.
-            base::ThreadPool::PostTask(
+            // CHECK-fail on the UI thread's blocking ban -- then ack back on
+            // the UI thread with the byte count (or an error).
+            base::ThreadPool::PostTaskAndReplyWithResult(
                 FROM_HERE, {base::MayBlock()},
                 base::BindOnce(
-                    [](std::string path, SkBitmap bitmap) {
+                    [](std::string path, SkBitmap bitmap) -> int {
                       std::optional<std::vector<uint8_t>> png =
                           gfx::PNGCodec::EncodeBGRASkBitmap(
                               bitmap, /*discard_transparency=*/false);
                       if (!png) {
                         LOG(WARNING) << "sendkeys: PNG encode failed";
+                        return -1;
+                      }
+                      if (!base::WriteFile(base::FilePath::FromASCII(path),
+                                           *png)) {
+                        LOG(WARNING) << "sendkeys: screenshot write failed";
+                        return -1;
+                      }
+                      return static_cast<int>(png->size());
+                    },
+                    path, result.value().bitmap),
+                base::BindOnce(
+                    [](base::WeakPtr<SendKeysWatcher> self, std::string id,
+                       std::string path, int bytes) {
+                      if (!self || id.empty()) {
                         return;
                       }
-                      base::WriteFile(base::FilePath::FromASCII(path), *png);
+                      base::DictValue r;
+                      if (bytes < 0) {
+                        r.Set("ok", false);
+                        r.Set("error", "png encode or file write failed");
+                      } else {
+                        r.Set("ok", true);
+                        r.Set("path", path);
+                        r.Set("bytes", bytes);
+                      }
+                      self->WriteResultFile(id, std::move(r));
                     },
-                    std::move(path), result.value().bitmap));
+                    self, id, path));
           },
-          out_path));
+          weak_factory_.GetWeakPtr(), result_id, out_path));
 }
 
 void SendKeysWatcher::WriteResultFile(const std::string& id,
@@ -1266,6 +1316,84 @@ void SendKeysWatcher::PollWaitFor(content::WeakDocumentPtr doc,
                 base::Milliseconds(100));
           },
           weak_factory_.GetWeakPtr(), doc, id, js, deadline),
+      content::ISOLATED_WORLD_ID_GLOBAL);  // the main world -- see InjectEval().
+}
+
+void SendKeysWatcher::InjectEvalAsync(content::RenderFrameHost* frame,
+                                     const std::string& spec) {
+  std::string id;
+  std::string body;
+  if (!frame || !SplitOnFirst(spec, '|', &id, &body)) {
+    LOG(WARNING) << "sendkeys: malformed EVALASYNC: line, expected id|body";
+    return;
+  }
+  // ExecuteJavaScriptForTests() cannot await a Promise returned by the script --
+  // the callback would get the unresolved Promise, not its value. So run <body>
+  // as an async function body (it may use await and return), stash the settled
+  // {ok,value}|{ok:false,error} on a per-id global, then poll that global from
+  // C++. This stash-then-poll IS the await -- lifted out of the JS client, where
+  // it used to live as evalAsync's hand-rolled window-token dance.
+  const std::string key = "__agent_eval_" + id;
+  const std::string kick = "(function(){var k='" + key +
+                           "';window[k]='__pending__';(async function(){try{"
+                           "var __v=await (async function(){" +
+                           body +
+                           "})();window[k]={ok:true,value:__v};}catch(e){"
+                           "window[k]={ok:false,error:String((e&&e.stack)||e)};"
+                           "}})();})()";
+  frame->ExecuteJavaScriptForTests(base::UTF8ToUTF16(kick), base::DoNothing(),
+                                   content::ISOLATED_WORLD_ID_GLOBAL);
+  PollEvalAsync(frame->GetWeakDocumentPtr(), id, key,
+                base::TimeTicks::Now() + base::Seconds(30));
+}
+
+void SendKeysWatcher::PollEvalAsync(content::WeakDocumentPtr doc,
+                                    std::string id,
+                                    std::string key,
+                                    base::TimeTicks deadline) {
+  content::RenderFrameHost* frame = doc.AsRenderFrameHostIfValid();
+  if (!frame) {
+    base::DictValue result;
+    result.Set("ok", false);
+    result.Set("error", "frame navigated away or was destroyed");
+    WriteResultFile(id, std::move(result));
+    return;
+  }
+  if (base::TimeTicks::Now() >= deadline) {
+    base::DictValue result;
+    result.Set("ok", false);
+    result.Set("timeout", true);
+    WriteResultFile(id, std::move(result));
+    frame->ExecuteJavaScriptForTests(
+        base::UTF8ToUTF16("try{delete window['" + key + "']}catch(e){}"),
+        base::DoNothing(), content::ISOLATED_WORLD_ID_GLOBAL);
+    return;
+  }
+  // Returns null while pending, else the settled {ok,...} dict (and clears it).
+  const std::string probe = "(function(){var k='" + key +
+                            "';var v=window[k];if(v===undefined||v==='__pending"
+                            "__')return null;delete window[k];return v;})()";
+  frame->ExecuteJavaScriptForTests(
+      base::UTF8ToUTF16(probe),
+      base::BindOnce(
+          [](base::WeakPtr<SendKeysWatcher> self, content::WeakDocumentPtr doc,
+             std::string id, std::string key, base::TimeTicks deadline,
+             base::Value value) {
+            if (!self) {
+              return;
+            }
+            if (value.is_dict()) {
+              self->WriteResultFile(id, std::move(value).TakeDict());
+              return;
+            }
+            content::GetUIThreadTaskRunner({})->PostDelayedTask(
+                FROM_HERE,
+                base::BindOnce(&SendKeysWatcher::PollEvalAsync, self,
+                               std::move(doc), std::move(id), std::move(key),
+                               deadline),
+                base::Milliseconds(100));
+          },
+          weak_factory_.GetWeakPtr(), doc, id, key, deadline),
       content::ISOLATED_WORLD_ID_GLOBAL);  // the main world -- see InjectEval().
 }
 
