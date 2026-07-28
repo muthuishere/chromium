@@ -36,7 +36,29 @@ Proven:
 - `Promise.resolve(42)` → `{}`  ✗ (returns the promise, un-awaited)
 
 For anything multiline or async, use `evalAsync` / `EVALASYNC` (native await) instead of sync
-`EVAL`. Net effect: **posting needs no composer, no clicks, no screenshots, no OS focus** — it's
+`EVAL`.
+
+### CSP-safe eval path — opt-in per call (2026-07-28)
+
+The default eval path ships the recipe body as base64 and runs it via `eval(atob(...))` *inside*
+the injected script. On a strict-CSP page (LinkedIn, most modern SPAs) the `script-src` omits
+`unsafe-eval`, so that runtime `eval()` throws `EvalError` and every DOM recipe on the page fails.
+Direct source injection is the fix but it is **opt-in per call**, because it changes how the body is
+placed into the injected script and the caller/agent decides when it's warranted:
+
+- **Fork protocol:** `EVALASYNC:<id>|b64:<base64-of-body>` — the fork base64-decodes the body and
+  interpolates the SOURCE directly into its main-world injected script. There is **no runtime
+  `eval()`/`Function()`** in the path, so the page's `script-src` has nothing to block. An UNMARKED
+  `EVALASYNC:<id>|<body>` is unchanged (the existing `eval(atob())` behavior); only the `b64:`
+  marker triggers the CSP-safe path.
+- **Client verbs:** `evalwithcsp` sends the `b64:`-marked form (CSP-safe); `evalwithoutcsp` (aliased
+  by `evalAsync`) sends the default form — so all existing callers are untouched. `recipe <site:name>
+  <opts> csp` opts a DOM recipe into the CSP-safe path for that one call.
+
+Verified end-to-end: on a strict-CSP page `evalwithoutcsp 'return 6*7'` → `EvalError`,
+`evalwithcsp 'return 6*7'` → `42`.
+
+Net effect: **posting needs no composer, no clicks, no screenshots, no OS focus** — it's
 the same internal API the web client fires (`post.js` notes the DOM composer "needs real OS focus
 to mount Quill" — the flaky-click wall; API-replay sidesteps it entirely).
 

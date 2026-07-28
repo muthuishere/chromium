@@ -393,6 +393,18 @@ the old client-side base64 `eval(atob(...))` + window-token stash+poll dance,
 which is now unnecessary. Synchronous `EVAL:<id>|<expr>` (expression completion
 value, no await) is unchanged.
 
+**CSP-safe variant — `EVALASYNC:<id>|b64:<base64-of-body>`.** A body prefixed
+with the `b64:` marker is base64-decoded and its SOURCE is interpolated directly
+into the fork's main-world injected script — there is no runtime `eval()`/
+`Function()` anywhere in the path. This is what makes it survive a strict page
+`Content-Security-Policy: script-src` that omits `unsafe-eval`: a page whose CSP
+blocks runtime eval (LinkedIn, most modern SPAs) would `EvalError` on the client's
+default `eval(atob(...))` path, but the injected source has nothing for the CSP to
+block. It is **opt-in per call** — an UNMARKED `EVALASYNC:<id>|<body>` is unchanged.
+(Client verbs: `evalwithcsp` sends the `b64:` form; `evalwithoutcsp`/`evalAsync`
+send the unmarked form.) Verified: on a strict-CSP page an unmarked `return 6*7`
+threw `EvalError`, the `b64:`-marked form returned `42`.
+
 ### Screenshot: always acks, and captures background tabs
 
 `SCREENSHOT:<id>|<path>` now **acks on every path**: `{"ok":true,"path":<path>,"bytes":<n>}`
@@ -426,6 +438,7 @@ the capture waiting for a visible surface.
 | `SCREENSHOT:<id>\|<path>` | PNG-encodes the surface to `<path>`; **acks** `{"ok":true,"path","bytes"}`/`{"ok":false,"error"}`; captures **background** tabs. Bare `SCREENSHOT:<path>` = fire-and-forget. Do NOT write inside the spool dir |
 | `EVAL:<id>\|<js>`         | Runs `<js>` (single expression, no await), writes `results/<id>.json` (DOM read/write, HTTP via sync XHR) |
 | `EVALASYNC:<id>\|<body>`  | Runs `<body>` as an async function body (may `await`/`return`); acks `{"ok":true,"value":...}`/`{"ok":false,"error":...}` — native eval-await |
+| `EVALASYNC:<id>\|b64:<b64-body>` | **CSP-safe** variant: base64-decodes `<body>` and injects its SOURCE directly (no runtime `eval()`/`Function()`), so a strict page `script-src` can't block it. Opt-in (`b64:` marker only); unmarked = unchanged |
 | `NEWTAB:<id>\|<url>`      | Opens a foreground tab; **acks** `{"ok":true,"tabId":"<uuid>"}`. Bare `NEWTAB:<url>` = fire-and-forget |
 | `LISTTABS:<id>`          | Returns each tab across ALL windows: `tabId`,`window`,`index`,`title`,`url`,`active` |
 | `WAITFOR:<ms>\|<id>\|<js>`| Polls `<js>` every 100ms until truthy/timeout, writes `results/<id>.json` |

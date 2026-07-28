@@ -118,9 +118,11 @@ error, check `chrome-agent status` before concluding a session died.
 ```
 chrome-agent up [url] | status | goto <url> | shot [path]
 chrome-agent recipes                       # list every runnable recipe (live catalog)
-chrome-agent recipe <site:name> [opts-json] # run ANY browser-research recipe via the fork
+chrome-agent recipe <site:name> [opts-json] [csp] # run ANY browser-research recipe via the fork (3rd arg csp = CSP-safe eval)
 chrome-agent do <site:name> [opts] [verify-js]  # VERIFY-OR-LEARN: run + verify; on fail auto-arm capture
-chrome-agent evalAsync '<async-js>'        # general async escape hatch (no recipe yet)
+chrome-agent evalAsync '<async-js>'        # general async escape hatch (no recipe yet); alias of evalwithoutcsp
+chrome-agent evalwithoutcsp '<async-js>'   # DEFAULT eval path — eval(atob()) inside the injected script
+chrome-agent evalwithcsp '<js-that-returns>'  # CSP-SAFE eval — source injected directly, survives strict script-src (LinkedIn etc.)
 chrome-agent linkedin like [post-url] [--confirm]  # self-verifying (aria-state flip); staged w/o --confirm
 
 # fast-learning:
@@ -145,6 +147,23 @@ a live X session** in the profile; when logged out, `x like/repost` correctly re
 Any write recipe works via the general runner too:
 `chrome-agent recipe linkedin:comment '{"postUrl":"…","text":"…","confirm":true}'`,
 `chrome-agent recipe x:reply '{…}'`, `chrome-agent recipe reddit:post '{…}'`, etc.
+
+## CSP-safe eval — for strict-CSP sites (2026-07-28)
+
+Strict-CSP pages (LinkedIn, most modern SPAs) send a `script-src` without `unsafe-eval`, which
+blocks the default eval path's runtime `eval(atob(...))` → `EvalError`. So DOM recipes
+(`linkedin:comment`, replies, any `evalAsync`-based recipe) fail there. Opt-in fix — the caller
+chooses per call; it is NOT applied everywhere:
+
+| Verb | Path | When to use |
+|---|---|---|
+| `evalwithoutcsp '<body>'` (alias `evalAsync`) | default `eval(atob(...))` in the injected script | anywhere but strict-CSP sites — all existing callers unchanged |
+| `evalwithcsp '<body-that-returns>'` | source interpolated directly into the injected script (no runtime `eval`/`Function`) — CSP can't block it | **strict-CSP sites like LinkedIn** |
+| `recipe <site:name> <opts-json> csp` | opts a DOM recipe into `evalwithcsp` for that one call | run a recipe on a strict-CSP site |
+
+**When to use:** strict-CSP sites like LinkedIn → `evalwithcsp` (or `recipe … csp`); everywhere else
+the default is fine. Verified: on a strict-CSP page `evalwithoutcsp 'return 6*7'` → `EvalError`,
+`evalwithcsp 'return 6*7'` → `42`.
 
 ## Verify-or-learn loop (self-maintaining)
 

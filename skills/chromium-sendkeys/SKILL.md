@@ -146,6 +146,12 @@ it may `await` and `return`, and acks `{"ok":true,"value":...}` /
 (e.g. `await fetch(...)`); plain `eval` is single-expression, no await. Send via
 `send "EVALASYNC:<id>|return (await fetch('/api')).status"`.
 
+**CSP-safe variant — `EVALASYNC:<id>|b64:<base64-of-body>`.** Prefix the body with
+`b64:` (base64-encoded) and the fork decodes it and injects the SOURCE directly into
+its main-world script — no runtime `eval()`/`Function()`, so a strict page
+`Content-Security-Policy: script-src` (no `unsafe-eval`, e.g. LinkedIn) can't block it.
+Opt-in per call; an unmarked `EVALASYNC:<id>|<body>` is unchanged.
+
 ## 3a. Audio & video in / out — raw media over WebSocket (no virtual driver)
 
 Design decision: audio AND video are streamed as **raw frames over local WebSockets**, NOT
@@ -270,6 +276,7 @@ stage-then-rename); `SPOOL:` = the raw line written. Commands with a
 | `rightclick <x> <y>` | `RIGHTCLICK:<x>,<y>` | right click → opens the **native** context menu | only when you actually need the OS context menu (it's not a DOM menu) |
 | `eval <js>` | `EVAL:<id>\|<js>` | run a single JS expression in the page's main frame (no await); JSON result **←reads back** | read/mutate DOM, click by selector (`el.click()`). Prefer this over blind x/y clicks. Use `evalAsync` when you need to `await` |
 | *(raw)* | `EVALASYNC:<id>\|<body>` | run `<body>` as an **async function body** (may `await`/`return`); acks `{ok,value}`/`{ok,error}` **←reads back** | native eval-await: `await fetch()` in-page, or any async DOM wait. Replaces the old base64 `eval(atob())` async hack |
+| *(raw)* | `EVALASYNC:<id>\|b64:<b64-body>` | **CSP-safe** eval-await: base64-decodes `<body>` and injects its SOURCE directly (no runtime `eval()`/`Function()`); opt-in via the `b64:` marker, unmarked = unchanged **←reads back** | run eval on a **strict-CSP page** (`script-src` without `unsafe-eval`, e.g. LinkedIn) where the default path throws `EvalError` |
 | `getdom` | `EVAL:<id>\|documentElement.outerHTML` | dump the DOM **←reads back** | inspect page structure before deciding what to click/type |
 | `http <url>` | `EVAL:<id>\|<sync-XHR>` | HTTP request **from inside the page** (its cookies/origin) **←reads back** | call an API as the logged-in page — no separate auth |
 | `waitfor <ms> <js>` | `WAITFOR:<ms>\|<id>\|<js>` | poll a JS predicate every 100ms until truthy or timeout **←reads back** | wait for SPA content/navigation to settle before the next step (don't sleep) |
