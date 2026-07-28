@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+# chrome-agent — the READ+WRITE social organ over the owner's UNDETECTABLE chromium fork.
+#
+# ARCHITECTURE (2026-07-15): don't reinvent per-site DOM driving. The browser-research skill
+# already has VERIFIED, general recipes (linkedin/x/youtube/reddit/fb/ig reads + post.js
+# staged-safe writes via internal-API replay). chrome-agent RUNS THOSE RECIPES UNCHANGED
+# through the fork's eval — undetectable + focus-independent — via two general primitives:
+#   - evalAsync <js>     : run ANY async/promise JS, get the result. The fork's native
+#                          EVALASYNC verb runs the body as an async function (await/return)
+#                          and acks the value directly — no client-side stash-on-global + poll.
+#   - recipe <site:name> : resolve a browser-research recipe by key + run its fn via evalAsync.
+# FAST-LEARNING: `capture` (arm→act→dump) instruments page fetch/XHR to reveal a site's REAL
+# API so you can promote it to a recipe; `learn` captures screenshot+DOM for the visual side.
+set -uo pipefail
+
+FORK="$HOME/muthu/gitworkspace/chromium"
+CJS="$FORK/chromesendkeys.cjs"
+LAUNCH="$FORK/chromium-agent-launch.cjs"
+SPOOL="$HOME/chrome-agent-sendkeys"
+PROFILE="$HOME/chrome-agent-profile"
+SKILL="$HOME/.claude/skills/chrome-agent"
+LEARN="$HOME/.config/chrome-agent/learn"
+LEDGER="$HOME/.config/chrome-agent/actions.ndjson"
+mkdir -p "$SPOOL" "$LEARN" "$(dirname "$LEDGER")"
+
+cj(){ node "$CJS" --dir "$SPOOL" "$@" 2>/dev/null | tail -1; }
+log(){ printf '{"ts":"%s","action":"%s","target":"%s","result":%s}\n' "$(date -u +%FT%TZ)" "$1" "$2" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$3")" >> "$LEDGER"; }
+
+# ---- PER-SESSION TAB (native tabId, 2026-07-28) ---------------------------------------------
+# The fork now hands out a stable per-tab UUID: NEWTAB:<id>|<url> acks {tabId}, LISTTABS reports
+# it, and TAB:<tabId>|<cmd> pins any command to that tab regardless of window focus. So each
+# session opens ONE dedicated tab on first use, remembers its tabId, and every page-targeting
+# command (goto/eval/evalasync/screenshot) rides it via `--tab`. This replaces the whole
+# window.name / tabs.json / activity-detection ownership machinery AND the browser mutex:
+# tabId isolation means lanes can no longer yank each other's tab.
+CA_TABIDS="$HOME/.config/chrome-agent/tabids"   # dir: one file per session, contents = tabId
+CA_TAB_ID="${CA_TAB_ID:-}"                       # cached for this process once resolved
+
+# Who am I? Session identity keys the remembered tabId. tmux session > env > "unowned".
+_tab_id(){
+  if [ -n "${CHROME_AGENT_ID:-}" ]; then echo "$CHROME_AGENT_ID"; return; fi
+  if [ -n "${DEEMWAR_TAB_ID:-}" ]; then echo "$DEEMWAR_TAB_ID"; return; fi
+  if [ -n "${TMUX:-}" ]; then tmux display-message -p '#{session_name}' 2>/dev/null; return; fi
+  echo "unowned"
+}
+
+# does a tabId still exist? (LISTTABS now includes tabId)
+_tab_exists(){ # $1=tabId
+  cj listtabs | python3 -c 'import sys,json
+tid=sys.argv[1]
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if any(t.get("tabId")==tid for t in d.get("value",[])) else 1)' "$1" 2>/dev/null
+}
+
+# Resolve THIS session's dedicated tabId, creating the tab (NEWTAB) on first use. Echoes the id.
+_ensure_tab(){
+  [ -n "$CA_TAB_ID" ] && { echo "$CA_TAB_ID"; return 0; }
+  local f tid; f="$CA_TABIDS/$(_tab_id)"
+  mkdir -p "$CA_TABIDS" 2>/dev/null
+  if [ -f "$f" ]; then
+    tid="$(cat "$f" 2>/dev/null)"
+    if [ -n "$tid" ] && _tab_exists "$tid"; then CA_TAB_ID="$tid"; echo "$tid"; return 0; fi
+  fi
+  # No live tab of ours — open one and remember its tabId (the ONLY place a session tab is made).
+  tid="$(cj newtab about:blank | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("tabId",""))
+except Exception: print("")' 2>/dev/null)"
+  [ -n "$tid" ] && { printf '%s' "$tid" > "$f"; CA_TAB_ID="$tid"; echo "$tid"; return 0; }
+  echo ""; return 1
+}
+_tab_flag(){ local t; t="$(_ensure_tab)"; [ -n "$t" ] && printf -- '--tab %s' "$t"; }
+# cjt = cj pinned to this session's tab (TAB:<tabId>| prefix, added by --tab)
+cjt(){ node "$CJS" --dir "$SPOOL" $(_tab_flag) "$@" 2>/dev/null | tail -1; }
+val(){ cjt eval "$1" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null; }
+
+# ---- general async primitive: run ANY promise-returning JS and get its result ----------
+# The fork's native EVALASYNC verb runs the body as an async function (await/return) on THIS
+# session's tab and acks {ok,value}/{ok,error}. We base64 the body (single-line + CSP-safe,
+# preserving newlines and // comments in recipe payloads) and hand back the SAME contract the
+# old stash+poll evalAsync did: the JSON-encoded return value, or {"error":...} on failure.
+# Shared JSON-contract parse for the eval* helpers.
+_eval_parse(){ python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception:
+    print("{\"error\":\"evalAsync: no result\"}"); sys.exit()
+if isinstance(d,dict) and d.get("ok"):
+    print(json.dumps(d.get("value"),separators=(",",":")))
+else:
+    print(json.dumps({"error": (d.get("error") if isinstance(d,dict) else "evalAsync failed")},separators=(",",":")))'; }
+
+# evalwithoutcsp — the ORIGINAL path: the page runs the body via eval(atob(...)).
+# Fine on ordinary pages; leave every existing caller here so nothing regresses.
+evalwithoutcsp(){  # $1=js function-body that RETURNS its value (may await); $2=timeout_s
+  local js="$1" tmo="${2:-20}" b64
+  b64=$(printf '(async()=>{ %s })()' "$js" | base64 | tr -d '\n')
+  cjt evalasync "return eval(atob('$b64'))" "$tmo" | _eval_parse
+}
+
+# evalwithcsp — CSP-SAFE path: send the body base64'd behind the fork's "b64:"
+# marker. The fork decodes it and interpolates the SOURCE straight into its
+# main-world injected script (no runtime eval()/Function()), so a strict
+# script-src page (LinkedIn et al.) can't throw EvalError. Use for DOM recipes on
+# CSP-strict sites; ordinary calls can stay on evalwithoutcsp. See ADR 0001.
+evalwithcsp(){  # $1=js function-body that RETURNS its value (may await); $2=timeout_s
+  local js="$1" tmo="${2:-20}" b64
+  b64=$(printf '%s' "$js" | base64 | tr -d '\n')
+  cjt evalasync "b64:$b64" "$tmo" | _eval_parse
+}
+
+# Back-compat: evalAsync stays the existing (non-CSP) behavior.
+evalAsync(){ evalwithoutcsp "$@"; }
+
+# _ensure_origin <site:name> — put the tab where the recipe can actually read cookies/DOM.
+#
+# WHY (2026-07-21): a site recipe reads that site's cookies from the ACTIVE TAB, and cookies are
+# origin-scoped. Run `linkedin:feed` while the tab sits on openrouter.ai and it returns
+# {"error":"no JSESSIONID - not logged in?"} for a PERFECTLY VALID session. That false logged-out
+# silently cost us 44 hours of LinkedIn posting while X kept publishing, and the owner spotted it
+# before any monitor did. The tab is shared mutable state — it is wherever the last lane left it —
+# so this is intermittent and ordering-dependent. Fixing it in the CALLER's head does not scale;
+# fix it here, once, for every caller.
+#
+# CAREFUL: navigating is WRONG for some recipes, so this is deliberately conservative.
+#   - generic:* / capture:* / compose:*  operate on WHATEVER page you are on -> never navigate.
+#   - recipes documented "open the post's permalink first" (linkedin:comment, comment-delete,
+#     reddit:comment, hackernews:comment) act on a page the CALLER chose -> never navigate.
+#   - the rest are credentialed API calls that need only the right ORIGIN -> navigate only when the
+#     HOST differs, never when we are already somewhere valid on that site.
+_ensure_origin(){
+  local key="$1" site="${1%%:*}" name="${1#*:}" want_host="" want_url="" cur=""
+  case "$site" in
+    generic|capture|compose) return 0 ;;                    # operate on the current page
+  esac
+  case "$key" in
+    linkedin:comment|linkedin:comment-delete|reddit:comment|hackernews:comment) return 0 ;;  # caller-chosen page
+  esac
+  case "$site" in
+    linkedin)   want_host="linkedin.com";      want_url="https://www.linkedin.com/feed/" ;;
+    x|twitter)  want_host="x.com";             want_url="https://x.com/home" ;;
+    reddit)     want_host="reddit.com";        want_url="https://www.reddit.com/" ;;
+    hackernews) want_host="news.ycombinator.com"; want_url="https://news.ycombinator.com/" ;;
+    *) return 0 ;;
+  esac
+  # linkedin:my-posts is a DOM scrape of the recent-activity page. Same origin is NOT enough:
+  # run from /feed/ it returns postCount:0, which is indistinguishable from "we have no posts".
+  [ "$key" = "linkedin:my-posts" ] && want_url="https://www.linkedin.com/in/me/recent-activity/all/"
+  # ORIGIN IS NOT ENOUGH for the LinkedIn voyager recipes — they need /feed/ specifically.
+  # Proven 2026-07-21: with the tab on linkedin.com/in/me/recent-activity (host matches!),
+  # linkedin:feed TIMED OUT; the same call from /feed/ returned 20 posts. linkedin:notifications
+  # documents the same requirement in its own describe ("Run it from /feed/ — the /notifications/
+  # page itself wedges every recipe eval"). So match the PATH we need, not just the host.
+  local want_path=""
+  case "$key" in
+    linkedin:my-posts) want_path="recent-activity" ;;
+    linkedin:*)        want_path="/feed" ;;
+  esac
+  cur=$(val "location.href" 2>/dev/null)
+  case "$cur" in
+    *"$want_host"*)
+      if [ -n "$want_path" ]; then
+        case "$cur" in *"$want_path"*) return 0 ;; esac   # right site AND right page
+      else return 0; fi ;;
+  esac
+  # 8s, not 3s: LinkedIn recent-activity/feed are heavy SPAs that keep rendering after load.
+  # With 3s, linkedin:my-posts navigated correctly and then TIMED OUT scraping a half-built DOM —
+  # which is indistinguishable from "the recipe is broken". Settle time is part of the contract.
+  goto "$want_url" 8 >/dev/null 2>&1
+  return 0
+}
+
+recipe(){  # $1=site:name  $2=opts-json(optional)  $3="csp" to run CSP-safe (opt-in)
+  local key="$1" opts="${2:-}" mode="${3:-}" tok="__ca_$$_$RANDOM" body res
+  # The whole recipe runs on THIS session's dedicated tab (goto + evalAsync both target it via
+  # tabId), so a concurrent lane can no longer yank the tab mid-read — native tabId isolation
+  # replaces the old browser mutex + per-agent tab-ownership machinery.
+  _ensure_origin "$key"
+  # recipe-run.mjs resolves the browser-research recipe by key and emits an async function BODY
+  # that returns its JSON result; evalAsync runs it through the fork's native EVALASYNC verb.
+  body=$(node "$SKILL/recipe-run.mjs" "$key" "$tok" "$opts" 2>/tmp/chrome-agent-recipe.err) || { cat /tmp/chrome-agent-recipe.err >&2; return 3; }
+  # DOM recipes on strict-CSP sites (LinkedIn et al.) need the CSP-safe path or the
+  # page's script-src throws EvalError. Opt in per call with a "csp" 3rd arg; the
+  # default stays evalAsync so every other recipe is untouched.
+  if [ "$mode" = "csp" ] || [ "$mode" = "--csp" ]; then res=$(evalwithcsp "$body" 20); else res=$(evalAsync "$body" 20); fi
+  [ -z "$res" ] && res='{"error":"recipe timeout"}'
+  echo "$res"; log "recipe:$key" "$key" "$res"
+}
+recipes(){ node -e "import(process.env.HOME+'/muthu/deemwarworkspace/browser-research-workspace/browser-research/extensions/browser-research/src/recipes/registry.js').then(m=>{for(const k of Object.keys(m.RECIPES).sort())console.log(' ',k,'—',m.RECIPES[k].describe||'')})" 2>/dev/null; }
+
+# ---- VERIFY-OR-LEARN loop (owner 2026-07-15: "verify always; if not, start learning") -----
+# Run an action, VERIFY its effect actually happened; if verification fails (recipe drifted,
+# selector changed, site re-skinned), AUTO-ARM capture so the next by-hand action re-teaches
+# the real API, and record the drift. This is what keeps the organ self-maintaining.
+DRIFT="$HOME/.config/chrome-agent/drift.ndjson"
+learn_mode(){ # $1=key $2=why
+  $CA_SELF capture arm >/dev/null 2>&1
+  printf '{"ts":"%s","key":"%s","why":%s}\n' "$(date -u +%FT%TZ)" "$1" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2")" >> "$DRIFT"
+  echo "{\"status\":\"LEARNING\",\"key\":\"$1\",\"why\":\"$2\",\"note\":\"capture armed — do the action by hand in the window, then: chrome-agent capture dump  (patch recipes/<site>.js from the real call)\"}"
+}
+CA_SELF="$SKILL/chrome-agent"
+do_verify(){ # $1=recipe-key $2=opts-json $3=verify-js(returns truthy if effect confirmed)
+  local key="$1" opts="${2:-}" vjs="${3:-}" res; res=$(recipe "$key" "$opts" 2>/dev/null)
+  # missing/empty/invalid result OR an explicit .error => the recipe drifted => LEARNING
+  if ! echo "$res" | python3 -c 'import sys,json;d=json.load(sys.stdin);sys.exit(1 if d.get("error") else 0)' 2>/dev/null; then
+    learn_mode "$key" "recipe failed/absent: $(echo "$res" | head -c 100)"; return 1; fi
+  if [ -n "$vjs" ]; then
+    local ok; ok=$(evalAsync "$vjs" 8)
+    case "$ok" in true|\"true\"|1) echo "{\"status\":\"OK\",\"verified\":true,\"result\":$res}";; *)
+      learn_mode "$key" "verify probe failed (got: $ok)"; return 1;; esac
+  else echo "{\"status\":\"OK\",\"verified\":\"n/a\",\"result\":$res}"; fi
+}
+
+# ---- LIKE (self-verifying UI action; no API recipe needed — verified by aria-state flip) ---
+# ---- ENGAGEMENT PACING (owner, 2026-07-26) --------------------------------------------------
+# "if you scroll fast on x or reddit they will ban atyleast a 1 second delay scrolling and liking"
+#
+# Each like already sleeps 2s INSIDE its own call, which looks like enough and is not: the gap that
+# matters is BETWEEN calls, and every call is a separate process, so a loop of 15 likes had no floor
+# at all — an in-process `sleep` cannot pace work that spans processes. The pace state therefore
+# lives in a FILE, shared by every lane and every invocation.
+#
+# Deliberately a floor, not a fixed sleep: if the action already took longer than the minimum
+# (navigation, DOM settle), we do not add delay on top. Pacing should cost nothing when the work
+# was already slow enough.
+CA_PACE_FILE="$HOME/.config/chrome-agent/last-engagement"
+CA_PACE_MIN="${CA_PACE_MIN:-2}"     # seconds; owner's floor is 1, we keep 2 for headroom
+_pace(){   # $1=label
+  local min="$CA_PACE_MIN" now last wait
+  [ "$min" -lt 1 ] 2>/dev/null && min=1     # never below the owner's stated floor
+  mkdir -p "$(dirname "$CA_PACE_FILE")" 2>/dev/null
+  now=$(date +%s); last=$(cat "$CA_PACE_FILE" 2>/dev/null || echo 0)
+  case "$last" in ''|*[!0-9]*) last=0;; esac
+  wait=$(( min - (now - last) ))
+  if [ "$wait" -gt 0 ]; then
+    [ "$wait" -gt "$min" ] && wait="$min"   # clock skew / a future timestamp must not stall us
+    echo "pacing ${1:-engagement}: waiting ${wait}s (min ${min}s between actions)" >&2
+    sleep "$wait"
+  fi
+  date +%s > "$CA_PACE_FILE"
+}
+
+li_like(){ # $1=post-url(optional; default acts on first feed post) [$2=--confirm]
+  [ -n "${1:-}" ] && [ "${1}" != "--confirm" ] && goto "$1" 4 || goto "https://www.linkedin.com/feed/" 4
+  local before; before=$(evalAsync "var b=document.querySelector('button[aria-label^=\"Reaction button state\"]'); return b?b.getAttribute('aria-label'):'no-btn';" 6)
+  [ "$before" = '"no-btn"' ] && { learn_mode "linkedin:like" "reaction button not found (selector drift)"; return 1; }
+  if [ "${2:-}" != "--confirm" ] && [ "${1:-}" != "--confirm" ]; then
+    echo "{\"site\":\"linkedin\",\"action\":\"like\",\"staged\":true,\"buttonState\":$before,\"note\":\"pass --confirm to actually like\"}"; return 0; fi
+  _pace "linkedin:like"
+  evalAsync "var b=document.querySelector('button[aria-label^=\"Reaction button state\"]'); if(b)b.click(); return 'clicked';" 6 >/dev/null; sleep 2
+  local after; after=$(evalAsync "var b=document.querySelector('button[aria-label^=\"Reaction button state\"]'); return b?b.getAttribute('aria-label'):'gone';" 6)
+  if echo "$after" | grep -qi 'like'; then echo "{\"site\":\"linkedin\",\"action\":\"like\",\"submitted\":true,\"verified\":true,\"state\":$after}"; log linkedin:like feed "liked $after";
+  else learn_mode "linkedin:like" "state did not flip to Like (got $after)"; return 1; fi
+}
+
+# ---- X engagement (self-verifying via data-testid flip) -----------------------
+x_like(){ # $1=tweet-url [$2=--confirm]
+  [ -n "${1:-}" ] && [ "${1}" != "--confirm" ] && goto "$1" 5 || goto "https://x.com/home" 5
+  local has; has=$(evalAsync "return document.querySelector('[data-testid=\"like\"]')?'yes':(document.querySelector('[data-testid=\"unlike\"]')?'already':'no');" 6)
+  case "$has" in \"no\") learn_mode "x:like" "like button not found (logged out or drift)"; return 1;; \"already\") echo '{"site":"x","action":"like","already":true}'; return 0;; esac
+  if [ "${2:-}" != "--confirm" ] && [ "${1:-}" != "--confirm" ]; then echo '{"site":"x","action":"like","staged":true,"note":"pass --confirm to like"}'; return 0; fi
+  _pace "x:like"
+  evalAsync "var b=document.querySelector('[data-testid=\"like\"]'); if(b)b.click(); return 'clicked';" 6 >/dev/null; sleep 2
+  local after; after=$(evalAsync "return document.querySelector('[data-testid=\"unlike\"]')?'liked':'not';" 6)
+  [ "$after" = '"liked"' ] && { echo '{"site":"x","action":"like","submitted":true,"verified":true}'; log x:like tweet liked; } || { learn_mode "x:like" "did not flip to unlike (got $after)"; return 1; }
+}
+x_repost(){ # $1=tweet-url [$2=--confirm]
+  [ -n "${1:-}" ] && [ "${1}" != "--confirm" ] && goto "$1" 5 || goto "https://x.com/home" 5
+  local has; has=$(evalAsync "return document.querySelector('[data-testid=\"retweet\"]')?'yes':(document.querySelector('[data-testid=\"unretweet\"]')?'already':'no');" 6)
+  case "$has" in \"no\") learn_mode "x:repost" "retweet button not found (logged out or drift)"; return 1;; \"already\") echo '{"site":"x","action":"repost","already":true}'; return 0;; esac
+  if [ "${2:-}" != "--confirm" ] && [ "${1:-}" != "--confirm" ]; then echo '{"site":"x","action":"repost","staged":true,"note":"pass --confirm to repost"}'; return 0; fi
+  _pace "x:repost"
+  evalAsync "var b=document.querySelector('[data-testid=\"retweet\"]'); if(b)b.click(); return 'menu';" 6 >/dev/null; sleep 1
+  evalAsync "var c=document.querySelector('[data-testid=\"retweetConfirm\"]'); if(c)c.click(); return 'confirmed';" 6 >/dev/null; sleep 2
+  local after; after=$(evalAsync "return document.querySelector('[data-testid=\"unretweet\"]')?'reposted':'not';" 6)
+  [ "$after" = '"reposted"' ] && { echo '{"site":"x","action":"repost","submitted":true,"verified":true}'; log x:repost tweet reposted; } || { learn_mode "x:repost" "did not flip to unretweet (got $after)"; return 1; }
+}
+# ---- Reddit upvote (self-verifying via aria-pressed) --------------------------
+reddit_upvote(){ # $1=post-url [$2=--confirm]
+  [ -n "${1:-}" ] && [ "${1}" != "--confirm" ] && goto "$1" 5 || { learn_mode "reddit:upvote" "post-url required"; return 1; }
+  local has; has=$(evalAsync "var b=document.querySelector('button[aria-label*=\"upvote\" i],button[upvote]'); return b?(b.getAttribute('aria-pressed')==='true'?'already':'yes'):'no';" 6)
+  case "$has" in \"no\") learn_mode "reddit:upvote" "upvote button not found (shadow DOM/logged out/drift)"; return 1;; \"already\") echo '{"site":"reddit","action":"upvote","already":true}'; return 0;; esac
+  if [ "${2:-}" != "--confirm" ] && [ "${1:-}" != "--confirm" ]; then echo '{"site":"reddit","action":"upvote","staged":true,"note":"pass --confirm to upvote"}'; return 0; fi
+  _pace "reddit:upvote"
+  evalAsync "var b=document.querySelector('button[aria-label*=\"upvote\" i],button[upvote]'); if(b)b.click(); return 'clicked';" 6 >/dev/null; sleep 2
+  local after; after=$(evalAsync "var b=document.querySelector('button[aria-label*=\"upvote\" i],button[upvote]'); return b&&b.getAttribute('aria-pressed')==='true'?'up':'not';" 6)
+  [ "$after" = '"up"' ] && { echo '{"site":"reddit","action":"upvote","submitted":true,"verified":true}'; log reddit:upvote post upvoted; } || { learn_mode "reddit:upvote" "aria-pressed did not become true (got $after)"; return 1; }
+}
+
+# ---- lifecycle ----------------------------------------------------------------
+up(){ local url="${1:-https://www.linkedin.com/feed/}"
+  if ! cj eval "1" >/dev/null 2>&1; then CHROMIUM_AGENT_PROFILE="$PROFILE" node "$LAUNCH" "$url" >/tmp/chrome-agent.log 2>&1 & sleep 12
+  else cj goto "$url" >/dev/null 2>&1; sleep 3; fi
+  val "navigator.webdriver===false ? 'undetected' : 'DETECTED'"; }
+# goto navigates THIS session's dedicated tab (creating it via NEWTAB on the first navigation),
+# so a background lane never steers the tab the human — or another lane — is on.
+goto(){ cjt goto "$1" >/dev/null 2>&1; sleep "${2:-4}"; }
+# shot — ASSERT THE FILE EXISTS. It used to swallow all output and then echo the path
+# unconditionally, so a screenshot that wrote nothing still printed a valid-looking path and
+# exit 0. On 2026-07-21 the fork's SCREENSHOT: verb was consumed but produced no PNG, and this
+# line reported success on every call — a posting lane trusted the path, found no image, and
+# nearly fell back to a full-desktop `screencapture` with the owner's tax scans on screen
+# ([[never-screencapture-the-desktop-for-a-post]]). Print the path ONLY if a non-empty file is
+# really there; otherwise fail loudly and name the missing capability.
+shot(){ local p="${1:-/tmp/chrome-agent-shot.png}" res ok
+  rm -f "$p" 2>/dev/null
+  # The fork's SCREENSHOT: verb now ACKS {ok,path,bytes}; trust that ack (plus a real on-disk
+  # file) instead of blind-polling for a file that may never appear.
+  res=$(cjt screenshot "$p")
+  ok=$(printf '%s' "$res" | python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception: d={}
+print("1" if d.get("ok") and d.get("bytes") else "")' 2>/dev/null)
+  if [ -n "$ok" ] && [ -s "$p" ]; then echo "$p"; return 0; fi
+  echo "chrome-agent shot: FAILED — no PNG written to $p" >&2
+  echo "  the fork consumed SCREENSHOT: but produced no file (eval/getdom on the same spool work)." >&2
+  echo "  Do NOT fall back to macOS screencapture — the desktop may hold private documents." >&2
+  return 1; }
+status(){ val "({webdriver:navigator.webdriver,url:location.href})"; }
+
+# ---- FAST-LEARNING ------------------------------------------------------------
+# 1) capture: learn a site's REAL API (the browser-research capture recipe: arm -> act -> dump)
+capture(){ case "${1:-}" in
+  arm)   recipe "capture:arm"   ;;   # start recording every fetch/XHR the page fires
+  dump)  recipe "capture:dump"  ;;   # show them (method/url/body) — THE api you replay
+  clear) recipe "capture:clear" ;;
+  *) echo "capture {arm|dump|clear}  — arm, do the action by hand in the window, dump to see the real API";; esac; }
+# 2) learn: the visual side — screenshot + DOM to Read/grep
+learn(){ local name="${1:-cap}"; [ -n "${2:-}" ] && { cjt goto "$2" >/dev/null 2>&1; sleep 5; }
+  rm -f "$LEARN/$name.png" 2>/dev/null
+  cjt screenshot "$LEARN/$name.png" >/dev/null 2>&1; cjt getdom > "$LEARN/$name.html" 2>/dev/null
+  # same honesty fix as shot(): never announce an artifact that was not written. The DOM half
+  # works even when the PNG half does not, so report them SEPARATELY rather than as one success.
+  if [ -s "$LEARN/$name.png" ]; then echo "SHOT: $LEARN/$name.png"
+  else echo "SHOT: ✗ none written (fork SCREENSHOT: produced no file) — use the DOM below" >&2; fi
+  echo "DOM:  $LEARN/$name.html ($(wc -c <"$LEARN/$name.html" 2>/dev/null) bytes)"
+  echo "-> Read the PNG for truth; grep the HTML for stable text/href/aria; or: chrome-agent capture arm|dump to get the API."; }
+
+# ---- high-level social verbs (thin wrappers over verified recipes) ------------
+jarg(){ python3 -c 'import json,sys;print(json.dumps({k.split("=",1)[0]:(k.split("=",1)[1]) for k in sys.argv[1:]}))' "$@"; }
+li_post(){  # $1=text  [$2=--confirm]
+  local conf=false; [ "${2:-}" = "--confirm" ] && conf=true
+  goto "https://www.linkedin.com/feed/" 3
+  recipe "linkedin:post" "$(python3 -c 'import json,sys;print(json.dumps({"text":sys.argv[1],"confirm":sys.argv[2]=="true"}))' "$1" "$conf")"; }
+li_post_image(){ # $1=text $2=imagePath [$3=--confirm]
+  local conf=false; [ "${3:-}" = "--confirm" ] && conf=true
+  [ -f "$2" ] || { echo "{\"error\":\"image not found: $2\"}"; return 1; }
+  goto "https://www.linkedin.com/feed/" 3
+  # the recipe runs IN the browser — it can't read a local path, so send the bytes as base64
+  local opts; opts=$(python3 -c '
+import json,sys,base64,mimetypes,os
+p=sys.argv[2]; b=base64.b64encode(open(p,"rb").read()).decode()
+print(json.dumps({"text":sys.argv[1],"imageB64":b,"imageMime":mimetypes.guess_type(p)[0] or "image/png","imageName":os.path.basename(p),"confirm":sys.argv[3]=="true"}))' "$1" "$2" "$conf")
+  recipe "linkedin:post-image" "$opts"; }
+li_feed(){ goto "https://www.linkedin.com/feed/" 3; recipe "linkedin:feed" '{"count":15}'; }
+x_post(){ local conf=false; [ "${2:-}" = "--confirm" ] && conf=true
+  goto "https://x.com/home" 3
+  recipe "x:post" "$(python3 -c 'import json,sys;print(json.dumps({"text":sys.argv[1],"confirm":sys.argv[2]=="true"}))' "$1" "$conf")"; }
+
+# ---- video READ (compose existing skills) -------------------------------------
+watch(){ local url="$1"
+  python3 "$SKILL/../social-media-ops/scripts/ytctl.py" audio "$url" 2>&1 | tail -2
+  local mp3; mp3=$(ls -t "$HOME/.config/social-media-ops"/*/*.mp3 2>/dev/null | head -1)
+  [ -z "$mp3" ] && { echo "no mp3 — check social-media-ops (yt-dlp/ffmpeg)"; return 1; }
+  ( cd "$SKILL/../video-transcribe" && GEMINI_API_KEY="$(zsh -ic 'echo $GEMINI_API_KEY' 2>/dev/null)" python3 scripts/transcribe.py "$mp3" 2>&1 | tail -2 )
+  echo "TRANSCRIPT: $(ls -t "$HOME/.config/video-transcribe"/*/transcript.md 2>/dev/null | head -1)"; }
+
+usage(){ cat <<'EOF'
+chrome-agent — social READ+WRITE (LinkedIn/X/YouTube/…) over the undetectable chromium fork.
+It RUNS browser-research's verified recipes through the fork — no per-site reinvention.
+
+  up [url] | status | goto <url> | shot [path]
+  recipes                         list every runnable recipe (browser-research catalog)
+  recipe <site:name> [opts-json]  run ANY recipe through the fork (general, all sites)
+  evalAsync '<async-js>'          run any promise-returning JS and get the result
+
+  FAST-LEARNING:
+  capture arm|dump|clear          learn a site's REAL API: arm, do the action by hand, dump
+  learn <name> [url]              capture screenshot+DOM to Read/grep
+
+  linkedin post "<text>" [--confirm]           staged unless --confirm (API replay, no composer)
+  linkedin post-image "<text>" <img> [--confirm]
+  linkedin feed
+  x post "<text>" [--confirm]
+  watch <video-url>               YouTube/IG/X video -> mp3 -> transcript.md
+
+WRITES are STAGED by default (safety contract from post.js) — nothing publishes without --confirm.
+EOF
+}
+
+case "${1:-}" in
+  up) up "${2:-}";; status) status;; goto) goto "${2:-}";; shot) shot "${2:-}";;
+  recipes) recipes;; recipe) recipe "${2:-}" "${3:-}" "${4:-}";; evalasync|evalAsync) evalAsync "${2:-}" "${3:-20}";;
+  evalwithcsp) evalwithcsp "${2:-}" "${3:-20}";; evalwithoutcsp) evalwithoutcsp "${2:-}" "${3:-20}";;
+  do) do_verify "${2:-}" "${3:-}" "${4:-}";;
+  capture) shift; capture "${1:-}";; learn) learn "${2:-cap}" "${3:-}";;
+  linkedin) shift; case "${1:-}" in
+      post) li_post "$2" "${3:-}";; post-image) li_post_image "$2" "$3" "${4:-}";; feed) li_feed;;
+      like) li_like "${2:-}" "${3:-}";;
+      *) usage;; esac;;
+  x) shift; case "${1:-}" in
+      post) x_post "$2" "${3:-}";; like) x_like "${2:-}" "${3:-}";; repost) x_repost "${2:-}" "${3:-}";;
+      reply) recipe "x:reply" "${2:-}";; *) usage;; esac;;
+  reddit) shift; case "${1:-}" in
+      upvote) reddit_upvote "${2:-}" "${3:-}";; comment) recipe "reddit:comment" "${2:-}";; post) recipe "reddit:post" "${2:-}";;
+      *) usage;; esac;;
+  watch) watch "$2";;
+  # tab primitives (pass-through to the fork). The skill gives EACH session its own dedicated
+  # tab automatically (NEWTAB acks a stable tabId; goto/eval/screenshot ride it via TAB:<tabId>|),
+  # so a lane never has to remember-and-restore the active tab and can no longer steer anyone
+  # else's. These raw primitives remain for manual inspection / one-off tab management.
+  tabs|listtabs) cj listtabs;;
+  newtab)   cj newtab "${2:-about:blank}" >/dev/null 2>&1; sleep "${3:-3}";;
+  selecttab) cj selecttab "${2:-0}" >/dev/null 2>&1;;
+  closetab)  cj closetab "${2:-}" >/dev/null 2>&1;;
+
+  # ---- per-session tab (native tabId; the skill maintains this internally) ----------------------
+  mytab)     # which tabId is this session's, and where is it?
+    _t="$(_ensure_tab)"
+    printf '{"agent":"%s","tabId":"%s","url":"%s"}\n' "$(_tab_id)" "$_t" "$(val 'location.href')" ;;
+  whosetab)  # describe the tab carrying a given tabId (LISTTABS now reports tabId across windows)
+    cj listtabs | python3 -c 'import sys,json
+tid=sys.argv[1] if len(sys.argv)>1 else ""
+d=json.load(sys.stdin).get("value",[])
+t=next((x for x in d if x.get("tabId")==tid),None)
+print(json.dumps(t) if t else json.dumps({"error":"no tab with tabId "+tid}))' "${2:-}" ;;
+  *) usage;;
+esac
