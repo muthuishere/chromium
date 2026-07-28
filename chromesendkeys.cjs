@@ -43,28 +43,38 @@
 const fs = require('fs');
 const path = require('path');
 
+// When set (via --tab <tabId>), every emitted spool line is prefixed with
+// `TAB:<tabId>|` so the fork pins the command to that tab regardless of window
+// focus. Only targeting verbs (goto/eval/evalasync/click/text/key/screenshot/
+// waitfor/netlog) should be invoked with --tab; tab-management verbs
+// (newtab/listtabs/selecttab/closetab) are never prefixed.
+let TAB_PREFIX = '';
+
 function usageAndExit() {
   console.error(
     'usage: chromesendkeys.js --dir <spool> ' +
-      '<add|type|key|click|rightclick|goto|screenshot|eval|getdom|http|' +
-      'waitfor|netlog|newtab|newwindow|closetab|selecttab|listtabs|send|push> ' +
-      '[args...]',
+      '<add|type|key|click|rightclick|goto|screenshot|eval|evalasync|getdom|' +
+      'http|waitfor|netlog|newtab|newwindow|closetab|selecttab|listtabs|send|' +
+      'push> [args...]',
   );
   process.exit(1);
 }
 
 function parseArgs(argv) {
   let dir = process.env.CHROMIUM_SENDKEYS_DIR || null;
+  let tab = null;
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dir') {
       dir = argv[++i];
+    } else if (argv[i] === '--tab') {
+      tab = argv[++i];
     } else {
       rest.push(argv[i]);
     }
   }
   if (!dir) usageAndExit();
-  return { dir, rest };
+  return { dir, tab, rest };
 }
 
 function stagingPath(dir) {
@@ -72,7 +82,7 @@ function stagingPath(dir) {
 }
 
 function appendLine(dir, line) {
-  fs.appendFileSync(stagingPath(dir), line + '\n');
+  fs.appendFileSync(stagingPath(dir), (TAB_PREFIX ? TAB_PREFIX + line : line) + '\n');
 }
 
 function push(dir) {
@@ -122,7 +132,8 @@ function sendAndAwait(dir, buildLine, timeoutMs) {
 }
 
 function main() {
-  const { dir, rest } = parseArgs(process.argv.slice(2));
+  const { dir, tab, rest } = parseArgs(process.argv.slice(2));
+  TAB_PREFIX = tab ? `TAB:${tab}|` : '';
   const [cmd, ...args] = rest;
   if (!cmd) usageAndExit();
 
@@ -154,13 +165,32 @@ function main() {
       appendLine(dir, `GOTO:${args.join(' ')}`);
       push(dir);
       break;
-    case 'screenshot':
-      appendLine(dir, `SCREENSHOT:${args.join(' ')}`);
-      push(dir);
+    case 'screenshot': {
+      // Two-way: the fork writes the PNG AND acks results/<id>.json with
+      // {ok,path,bytes} (or {ok:false,error}) -- no more blind poll for a file
+      // that may never appear.
+      const p = args.join(' ');
+      const result = sendAndAwait(dir, (id) => `SCREENSHOT:${id}|${p}`);
+      console.log(JSON.stringify(result));
       break;
+    }
     case 'eval': {
       const js = args.join(' ');
       const result = sendAndAwait(dir, (id) => `EVAL:${id}|${js}`);
+      console.log(JSON.stringify(result));
+      break;
+    }
+    case 'evalasync': {
+      // Runs the body as an async function body (may `await`/`return`) inside
+      // the fork and acks {ok:true,value} / {ok:false,error}. Replaces the old
+      // client-side "stash result on window[token] then poll" dance.
+      const body = args[0] || '';
+      const tmoS = Number(args[1] || 20);
+      const result = sendAndAwait(
+        dir,
+        (id) => `EVALASYNC:${id}|${body}`,
+        tmoS * 1000 + 5000,
+      );
       console.log(JSON.stringify(result));
       break;
     }
@@ -196,10 +226,14 @@ function main() {
       console.log(JSON.stringify(result));
       break;
     }
-    case 'newtab':
-      appendLine(dir, `NEWTAB:${args.join(' ')}`);
-      push(dir);
+    case 'newtab': {
+      // Two-way: the fork opens the tab AND acks results/<id>.json with
+      // {ok:true,tabId} so the caller can pin later commands to it via --tab.
+      const url = args.join(' ');
+      const result = sendAndAwait(dir, (id) => `NEWTAB:${id}|${url}`);
+      console.log(JSON.stringify(result));
       break;
+    }
     case 'newwindow':
       appendLine(dir, `NEWWINDOW:${args.join(' ')}`);
       push(dir);
