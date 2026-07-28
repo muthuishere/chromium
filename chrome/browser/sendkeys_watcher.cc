@@ -22,6 +22,8 @@
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/supports_user_data.h"
+#include "base/uuid.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
@@ -285,6 +287,54 @@ bool ConsumePrefix(const std::string& line,
   }
   *rest = line.substr(prefix.size());
   return true;
+}
+
+// Fork-local per-tab stable identity. A UUID minted lazily on first access and
+// carried on the WebContents itself (base::SupportsUserData), so it travels with
+// that exact tab for its whole life. Unlike a tab-strip index it never shifts
+// when sibling tabs close; unlike a process-local counter it never collides
+// across restarts -- a stale id simply resolves to no tab (see ResolveTabId).
+const void* const kAgentTabIdKey = &kAgentTabIdKey;
+
+class AgentTabIdData : public base::SupportsUserData::Data {
+ public:
+  const std::string id = base::Uuid::GenerateRandomV4().AsLowercaseString();
+};
+
+const std::string& GetOrCreateTabId(content::WebContents* wc) {
+  auto* data = static_cast<AgentTabIdData*>(wc->GetUserData(kAgentTabIdKey));
+  if (!data) {
+    auto owned = std::make_unique<AgentTabIdData>();
+    data = owned.get();
+    wc->SetUserData(kAgentTabIdKey, std::move(owned));
+  }
+  return data->id;
+}
+
+// The results/<id>.json id the client will poll for a given inner command line,
+// so an unknown-tabId failure can be reported instead of hanging the client on a
+// result file that never appears. Empty when the command writes no result file.
+std::string MaybeResultIdFor(const std::string& line) {
+  std::string rest;
+  if (ConsumePrefix(line, "NEWTAB:", &rest)) {
+    // NEWTAB acks only when given a "<resultId>|<url>" form.
+    size_t bar = rest.find('|');
+    return bar == std::string::npos ? std::string() : rest.substr(0, bar);
+  }
+  if (ConsumePrefix(line, "EVAL:", &rest) ||
+      ConsumePrefix(line, "LISTTABS:", &rest)) {
+    return rest.substr(0, rest.find('|'));  // id is the first field.
+  }
+  if (ConsumePrefix(line, "WAITFOR:", &rest)) {
+    // WAITFOR:<timeout>|<id>|<js> -- id is the second field.
+    size_t first = rest.find('|');
+    if (first == std::string::npos) {
+      return std::string();
+    }
+    std::string after = rest.substr(first + 1);
+    return after.substr(0, after.find('|'));
+  }
+  return std::string();
 }
 
 // Splits on the first occurrence of `sep` only -- EVAL/WAITFOR payloads are
@@ -644,6 +694,23 @@ content::WebContents* SendKeysWatcher::GetTargetWebContents() {
   return tab->GetContents();
 }
 
+content::WebContents* SendKeysWatcher::ResolveTabId(const std::string& tab_id) {
+  // Enumeration across all windows is authoritative: a closed tab is simply
+  // absent (-> nullptr -> "unknown tabId"), so there is no registry to keep in
+  // sync and no dangling pointer to guard against.
+  for (BrowserWindowInterface* browser : GetAllBrowserWindowInterfaces()) {
+    TabStripModel* tab_strip = browser->GetTabStripModel();
+    for (int i = 0; i < tab_strip->count(); ++i) {
+      content::WebContents* wc = tab_strip->GetWebContentsAt(i);
+      auto* data = static_cast<AgentTabIdData*>(wc->GetUserData(kAgentTabIdKey));
+      if (data && data->id == tab_id) {
+        return wc;
+      }
+    }
+  }
+  return nullptr;
+}
+
 void SendKeysWatcher::InjectAudioStart(const std::string& port_str) {
   int port = 0;
   if (!base::StringToInt(port_str, &port) || port <= 0 || port > 65535) {
@@ -759,7 +826,38 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     return;
   }
 
-  content::WebContents* contents = GetTargetWebContents();
+  // Optional "TAB:<tabId>|" prefix pins this line to one specific tab by its
+  // stable UUID, independent of window focus or stray tabs -- the deterministic
+  // targeting the last-active default cannot guarantee. A supplied-but-unknown
+  // id is a hard error (the tab was closed or the fork restarted); it must NOT
+  // silently fall back to last-active, or the exact about:blank race this fixes
+  // would come back invisibly.
+  content::WebContents* contents = nullptr;
+  std::string after_tab;
+  if (ConsumePrefix(line, "TAB:", &after_tab)) {
+    size_t bar = after_tab.find('|');
+    if (bar == std::string::npos) {
+      LOG(WARNING) << "sendkeys: TAB: missing '|' in '" << line << "'";
+      return;
+    }
+    std::string tab_id = after_tab.substr(0, bar);
+    line = after_tab.substr(bar + 1);
+    contents = ResolveTabId(tab_id);
+    if (!contents) {
+      LOG(WARNING) << "sendkeys: TAB: unknown tabId '" << tab_id
+                   << "' (tab closed or fork restarted)";
+      std::string result_id = MaybeResultIdFor(line);
+      if (!result_id.empty()) {
+        base::DictValue err;
+        err.Set("ok", false);
+        err.Set("error", "unknown tabId");
+        WriteResultFile(result_id, std::move(err));
+      }
+      return;
+    }
+  } else {
+    contents = GetTargetWebContents();
+  }
   if (!contents) {
     LOG(WARNING) << "sendkeys: no active tab, dropping line: " << line;
     return;
@@ -878,11 +976,28 @@ void SendKeysWatcher::InjectGoto(content::WebContents* contents,
   contents->GetController().LoadURLWithParams(params);
 }
 
-void SendKeysWatcher::InjectNewTab(const std::string& url) {
+void SendKeysWatcher::InjectNewTab(const std::string& spec) {
+  // "<resultId>|<url>" requests an ack carrying the new tab's stable UUID (the
+  // caller's dedicated surface for every later TAB:<id>| command). A bare
+  // "<url>" (no '|') stays fire-and-forget for back-compat.
+  std::string result_id;
+  std::string url = spec;
+  size_t bar = spec.find('|');
+  if (bar != std::string::npos) {
+    result_id = spec.substr(0, bar);
+    url = spec.substr(bar + 1);
+  }
+
   BrowserWindowInterface* browser =
       GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   if (!browser) {
     LOG(WARNING) << "sendkeys: NEWTAB: no active browser window";
+    if (!result_id.empty()) {
+      base::DictValue err;
+      err.Set("ok", false);
+      err.Set("error", "no active browser window");
+      WriteResultFile(result_id, std::move(err));
+    }
     return;
   }
   GURL gurl(url.empty() ? "about:blank" : url);
@@ -892,6 +1007,19 @@ void SendKeysWatcher::InjectNewTab(const std::string& url) {
   NavigateParams params(browser, gurl, ui::PAGE_TRANSITION_TYPED);
   params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
   Navigate(&params, base::DoNothing());
+
+  if (!result_id.empty()) {
+    base::DictValue result;
+    content::WebContents* wc = params.navigated_or_inserted_contents;
+    if (wc) {
+      result.Set("ok", true);
+      result.Set("tabId", GetOrCreateTabId(wc));
+    } else {
+      result.Set("ok", false);
+      result.Set("error", "tab not created");
+    }
+    WriteResultFile(result_id, std::move(result));
+  }
 }
 
 void SendKeysWatcher::InjectNewWindow(const std::string& url) {
@@ -952,21 +1080,26 @@ void SendKeysWatcher::InjectSelectTab(const std::string& index_str) {
 }
 
 void SendKeysWatcher::InjectListTabs(const std::string& id) {
-  BrowserWindowInterface* browser =
-      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+  // Enumerate every tab across all windows and stamp each with its stable UUID
+  // (minting one on first sighting), so a caller can discover the tabId to pin
+  // later commands to -- the whole point of the registry.
   base::ListValue tab_list;
-  if (browser) {
+  int window_ordinal = 0;
+  for (BrowserWindowInterface* browser : GetAllBrowserWindowInterfaces()) {
     TabStripModel* tab_strip = browser->GetTabStripModel();
     const int active = tab_strip->active_index();
     for (int i = 0; i < tab_strip->count(); ++i) {
       content::WebContents* wc = tab_strip->GetWebContentsAt(i);
       base::DictValue tab;
+      tab.Set("tabId", GetOrCreateTabId(wc));
+      tab.Set("window", window_ordinal);
       tab.Set("index", i);
       tab.Set("title", base::UTF16ToUTF8(wc->GetTitle()));
       tab.Set("url", wc->GetLastCommittedURL().spec());
       tab.Set("active", i == active);
       tab_list.Append(std::move(tab));
     }
+    ++window_ordinal;
   }
   base::DictValue result;
   result.Set("ok", true);

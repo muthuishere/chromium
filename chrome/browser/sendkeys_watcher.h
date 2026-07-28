@@ -154,6 +154,12 @@ class SendKeysWatcher {
   // GetLastActiveBrowserWindowInterfaceWithAnyProfile(). May return nullptr.
   content::WebContents* GetTargetWebContents();
 
+  // Resolves a tab by its stable UUID (minted by GetOrCreateTabId, surfaced via
+  // NEWTAB/LISTTABS) by enumerating all windows. Returns nullptr when no live
+  // tab carries that id (closed, or the fork restarted) -- callers must treat
+  // that as an error, never as "use the active tab".
+  content::WebContents* ResolveTabId(const std::string& tab_id);
+
   base::FilePath spool_dir_;
   std::unique_ptr<std::thread> thread_;
   std::atomic<bool> stop_requested_{false};
