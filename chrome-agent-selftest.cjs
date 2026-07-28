@@ -103,6 +103,21 @@ function teardown() {
     send('LISTTABS:lt'); const lt = await wait('lt');
     ok('LISTTABS reports tabId per tab', lt.ok && Array.isArray(lt.value) && lt.value.every(t => 'tabId' in t), JSON.stringify(lt.value && lt.value[0]));
 
+    // T5b CLOSETAB:<uuid> closes that exact tab (not an index)
+    send('NEWTAB:ntc|about:blank'); const ntc = await wait('ntc'); const closeId = ntc.tabId; await sleep(500);
+    send(`CLOSETAB:${closeId}`); await sleep(600);
+    send('LISTTABS:lc'); const lc = await wait('lc');
+    const gone = ntc.ok && Array.isArray(lc.value) && !lc.value.some(t => t.tabId === closeId);
+    ok('CLOSETAB:<uuid> closes that exact tab', gone, closeId);
+
+    // T5c SELECTTAB:<uuid> activates that exact tab
+    send('NEWTAB:nts|about:blank'); const nts = await wait('nts'); const selId = nts.tabId; await sleep(400);
+    send('SELECTTAB:0'); await sleep(300);
+    send(`SELECTTAB:${selId}`); await sleep(400);
+    send('LISTTABS:ls'); const ls = await wait('ls');
+    const sel = ls.value && ls.value.find(t => t.tabId === selId);
+    ok('SELECTTAB:<uuid> activates that exact tab', nts.ok && sel && sel.active === true, JSON.stringify(sel));
+
     // T6 EVALASYNC awaits a real promise / timer / surfaces throws
     send('EVALASYNC:a1|const r=await fetch("https://example.com/");return (await r.text()).length;');
     const a1 = await wait('a1');

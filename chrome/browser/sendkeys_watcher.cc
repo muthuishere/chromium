@@ -1040,7 +1040,26 @@ void SendKeysWatcher::InjectNewWindow(const std::string& url) {
   Navigate(&params, base::DoNothing());
 }
 
-void SendKeysWatcher::InjectCloseTab(const std::string& index_str) {
+void SendKeysWatcher::InjectCloseTab(const std::string& arg) {
+  // A non-numeric arg is a stable tabId: close THAT tab in whatever window holds
+  // it (the index-based path can't address a specific tab across windows).
+  int probe = 0;
+  if (!arg.empty() && !base::StringToInt(arg, &probe)) {
+    for (BrowserWindowInterface* b : GetAllBrowserWindowInterfaces()) {
+      TabStripModel* ts = b->GetTabStripModel();
+      for (int i = 0; i < ts->count(); ++i) {
+        auto* data = static_cast<AgentTabIdData*>(
+            ts->GetWebContentsAt(i)->GetUserData(kAgentTabIdKey));
+        if (data && data->id == arg) {
+          ts->CloseWebContentsAt(
+              i, CLOSE_USER_GESTURE | CLOSE_CREATE_HISTORICAL_TAB);
+          return;
+        }
+      }
+    }
+    LOG(WARNING) << "sendkeys: CLOSETAB: unknown tabId '" << arg << "'";
+    return;
+  }
   BrowserWindowInterface* browser =
       GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   if (!browser) {
@@ -1049,8 +1068,8 @@ void SendKeysWatcher::InjectCloseTab(const std::string& index_str) {
   }
   TabStripModel* tab_strip = browser->GetTabStripModel();
   int index = tab_strip->active_index();
-  if (!index_str.empty() && !base::StringToInt(index_str, &index)) {
-    LOG(WARNING) << "sendkeys: CLOSETAB: bad index '" << index_str << "'";
+  if (!arg.empty() && !base::StringToInt(arg, &index)) {
+    LOG(WARNING) << "sendkeys: CLOSETAB: bad index '" << arg << "'";
     return;
   }
   if (index < 0 || index >= tab_strip->count()) {
@@ -1061,7 +1080,24 @@ void SendKeysWatcher::InjectCloseTab(const std::string& index_str) {
       index, CLOSE_USER_GESTURE | CLOSE_CREATE_HISTORICAL_TAB);
 }
 
-void SendKeysWatcher::InjectSelectTab(const std::string& index_str) {
+void SendKeysWatcher::InjectSelectTab(const std::string& arg) {
+  // A non-numeric arg is a stable tabId: activate THAT tab in its own window.
+  int probe = 0;
+  if (!arg.empty() && !base::StringToInt(arg, &probe)) {
+    for (BrowserWindowInterface* b : GetAllBrowserWindowInterfaces()) {
+      TabStripModel* ts = b->GetTabStripModel();
+      for (int i = 0; i < ts->count(); ++i) {
+        auto* data = static_cast<AgentTabIdData*>(
+            ts->GetWebContentsAt(i)->GetUserData(kAgentTabIdKey));
+        if (data && data->id == arg) {
+          ts->ActivateTabAt(i);
+          return;
+        }
+      }
+    }
+    LOG(WARNING) << "sendkeys: SELECTTAB: unknown tabId '" << arg << "'";
+    return;
+  }
   BrowserWindowInterface* browser =
       GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   if (!browser) {
@@ -1070,8 +1106,8 @@ void SendKeysWatcher::InjectSelectTab(const std::string& index_str) {
   }
   TabStripModel* tab_strip = browser->GetTabStripModel();
   int index = 0;
-  if (!base::StringToInt(index_str, &index)) {
-    LOG(WARNING) << "sendkeys: SELECTTAB: bad index '" << index_str << "'";
+  if (!base::StringToInt(arg, &index)) {
+    LOG(WARNING) << "sendkeys: SELECTTAB: bad index '" << arg << "'";
     return;
   }
   if (index < 0 || index >= tab_strip->count()) {
