@@ -77,8 +77,20 @@ function parseArgs(argv) {
   return { dir, tab, rest };
 }
 
+// PER-PROCESS staging file (2026-07-29). The old shared name
+// `.chromium-sendkeys-staging` made concurrent push() a TOCTOU race: two
+// producers appended to the same file, the winner's rename carried BOTH lines
+// (both executed in the browser), the loser's renameSync threw ENOENT — a
+// crash-after-execute that callers retried into DUPLICATE writes (the 07-28
+// double-post). A unique-per-process staging name makes the rename race-free
+// by construction and closes the ghost-command window (a crash between append
+// and push can no longer be published by an unrelated caller's auto-push).
+const STAGING_NAME = `.staging-${Date.now()}-${process.pid}-${Math.random()
+  .toString(36)
+  .slice(2)}`;
+
 function stagingPath(dir) {
-  return path.join(dir, '.chromium-sendkeys-staging');
+  return path.join(dir, STAGING_NAME);
 }
 
 function appendLine(dir, line) {
@@ -86,15 +98,34 @@ function appendLine(dir, line) {
 }
 
 function push(dir) {
-  const staging = stagingPath(dir);
-  if (!fs.existsSync(staging)) {
-    return; // nothing staged
+  // Normal case: publish THIS process's staging file. The standalone `push`
+  // verb (batch add ... push, separate invocations) has no own staging, so it
+  // flushes every `.staging-*` file present (plus the legacy shared name).
+  const own = stagingPath(dir);
+  let candidates;
+  if (fs.existsSync(own)) {
+    candidates = [own];
+  } else {
+    candidates = fs
+      .readdirSync(dir)
+      .filter(
+        (f) => f.startsWith('.staging-') || f === '.chromium-sendkeys-staging',
+      )
+      .map((f) => path.join(dir, f));
   }
-  const dest = path.join(
-    dir,
-    `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}.txt`,
-  );
-  fs.renameSync(staging, dest); // atomic publish
+  for (const staging of candidates) {
+    const dest = path.join(
+      dir,
+      `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}.txt`,
+    );
+    try {
+      fs.renameSync(staging, dest); // atomic publish
+    } catch (e) {
+      // Another `push` flushed this file first — its lines are published
+      // either way; never crash after the command may already be in flight.
+      if (e.code !== 'ENOENT') throw e;
+    }
+  }
 }
 
 function randomId() {
@@ -127,7 +158,17 @@ function waitForResult(dir, id, timeoutMs) {
 function sendAndAwait(dir, buildLine, timeoutMs) {
   const id = randomId();
   appendLine(dir, buildLine(id));
-  push(dir);
+  // IDEMPOTENCY GUARD (2026-07-29): even if push() throws, the command may
+  // already have been published (e.g. another process flushed our staging via
+  // the standalone `push` verb). NEVER die between publish and result-read —
+  // that asymmetry is what turned executed writes into "failures" that callers
+  // retried into duplicates. Always fall through to waitForResult: if the
+  // browser executed the command, results/<id>.json answers honestly.
+  try {
+    push(dir);
+  } catch (e) {
+    process.stderr.write(`push failed (checking for result anyway): ${e}\n`);
+  }
   return waitForResult(dir, id, timeoutMs || 10000);
 }
 

@@ -23,7 +23,21 @@ LEARN="$HOME/.config/chrome-agent/learn"
 LEDGER="$HOME/.config/chrome-agent/actions.ndjson"
 mkdir -p "$SPOOL" "$LEARN" "$(dirname "$LEDGER")"
 
-cj(){ node "$CJS" --dir "$SPOOL" "$@" 2>/dev/null | tail -1; }
+# cj — run the engine CLI. CRASH-VISIBLE (2026-07-29): the old `2>/dev/null | tail -1`
+# swallowed engine crashes into an EMPTY STRING, indistinguishable from "nothing happened" —
+# callers retried a --confirm write that HAD executed (the 07-28 double-post). Now a crash
+# with no output yields an explicit {"ok":false,"error":"cli-crash",...} so no caller may
+# treat it as "not sent". RULE: never blind-retry a --confirm/write on this error — the
+# command may have executed; verify (results/<id>.json, or re-read the site) before resending.
+cj(){ local out rc
+  out=$(node "$CJS" --dir "$SPOOL" "$@" 2>/tmp/chrome-agent-cj.err); rc=$?
+  if [ $rc -ne 0 ] && [ -z "$out" ]; then
+    printf '{"ok":false,"error":"cli-crash","exit":%d,"detail":%s}\n' "$rc" \
+      "$(python3 -c 'import json,sys;print(json.dumps(open("/tmp/chrome-agent-cj.err").read()[-300:]))' 2>/dev/null || echo '""')"
+    return $rc
+  fi
+  printf '%s\n' "$out" | tail -1
+}
 log(){ printf '{"ts":"%s","action":"%s","target":"%s","result":%s}\n' "$(date -u +%FT%TZ)" "$1" "$2" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$3")" >> "$LEDGER"; }
 
 # ---- PER-SESSION TAB (native tabId, 2026-07-28) ---------------------------------------------
@@ -71,7 +85,15 @@ except Exception: print("")' 2>/dev/null)"
 }
 _tab_flag(){ local t; t="$(_ensure_tab)"; [ -n "$t" ] && printf -- '--tab %s' "$t"; }
 # cjt = cj pinned to this session's tab (TAB:<tabId>| prefix, added by --tab)
-cjt(){ node "$CJS" --dir "$SPOOL" $(_tab_flag) "$@" 2>/dev/null | tail -1; }
+cjt(){ local out rc
+  out=$(node "$CJS" --dir "$SPOOL" $(_tab_flag) "$@" 2>/tmp/chrome-agent-cj.err); rc=$?
+  if [ $rc -ne 0 ] && [ -z "$out" ]; then
+    printf '{"ok":false,"error":"cli-crash","exit":%d,"detail":%s}\n' "$rc" \
+      "$(python3 -c 'import json,sys;print(json.dumps(open("/tmp/chrome-agent-cj.err").read()[-300:]))' 2>/dev/null || echo '""')"
+    return $rc
+  fi
+  printf '%s\n' "$out" | tail -1
+}
 val(){ cjt eval "$1" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))' 2>/dev/null; }
 
 # ---- general async primitive: run ANY promise-returning JS and get its result ----------
@@ -287,7 +309,22 @@ reddit_upvote(){ # $1=post-url [$2=--confirm]
 }
 
 # ---- lifecycle ----------------------------------------------------------------
+# _sweep_spool — STALE-SPOOL GUARD (2026-07-29). Queued .txt commands left in the spool
+# (staged while the fork was down, or orphaned by a crash) REPLAY when the watcher starts —
+# yesterday's staged post fires unattended on relaunch. Quarantine anything older than 5 min
+# instead of executing it; also clean results/ of >7-day orphans (crashed readers never
+# delete their result file — 151 had piled up by 07-29).
+_sweep_spool(){
+  local q="$SPOOL/quarantine"; mkdir -p "$q" "$SPOOL/results" 2>/dev/null
+  local n; n=$(find "$SPOOL" -maxdepth 1 \( -name '*.txt' -o -name '.staging-*' -o -name '.chromium-sendkeys-staging' \) -mmin +5 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${n:-0}" -gt 0 ]; then
+    find "$SPOOL" -maxdepth 1 \( -name '*.txt' -o -name '.staging-*' -o -name '.chromium-sendkeys-staging' \) -mmin +5 -exec mv {} "$q"/ \; 2>/dev/null
+    echo "spool sweep: quarantined $n stale command file(s) -> $q (NOT replayed)" >&2
+  fi
+  find "$SPOOL/results" -maxdepth 1 -name '*.json' -mtime +7 -delete 2>/dev/null
+}
 up(){ local url="${1:-https://www.linkedin.com/feed/}"
+  _sweep_spool
   if ! cj eval "1" >/dev/null 2>&1; then CHROMIUM_AGENT_PROFILE="$PROFILE" node "$LAUNCH" "$url" >/tmp/chrome-agent.log 2>&1 & sleep 12
   else cj goto "$url" >/dev/null 2>&1; sleep 3; fi
   val "navigator.webdriver===false ? 'undetected' : 'DETECTED'"; }
