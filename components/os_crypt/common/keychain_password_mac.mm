@@ -113,6 +113,27 @@ base::expected<std::string, OSStatus> GetPasswordImpl(
   return base::unexpected(password.error());
 }
 
+// AGENT BUILD: resolve the OSCrypt password from an environment variable when
+// one is present. This is the portable, keychain-free path for a profile that
+// roams between machines (rclone/S3 sync): the same $CHROMIUM_SAFE_STORAGE_KEY
+// on every host makes OSCrypt derive the SAME AES key everywhere, so cookies
+// and saved logins in a synced profile decrypt without ever touching (or
+// prompting) the OS Keychain. The value is the raw Safe Storage password
+// string (what `security find-generic-password -w -s "Chrome Safe Storage"
+// -a "Chrome"` prints); trailing whitespace/newline is trimmed. Returns false
+// (fall through to the file, then the Keychain) if the var is unset/empty.
+bool ReadAgentKeyEnv(std::string* out) {
+  std::unique_ptr<base::Environment> env = base::Environment::Create();
+  std::string value =
+      env->GetVar("CHROMIUM_SAFE_STORAGE_KEY").value_or(std::string());
+  std::string trimmed(base::TrimWhitespaceASCII(value, base::TRIM_TRAILING));
+  if (trimmed.empty()) {
+    return false;
+  }
+  *out = std::move(trimmed);
+  return true;
+}
+
 // AGENT BUILD: resolve the OSCrypt password from a file instead of the macOS
 // Keychain when one is present. This makes the browser never trigger a
 // "<App> Safe Storage" Keychain prompt (a locally-built, non-stably-signed
@@ -176,7 +197,13 @@ KeychainPassword::KeychainPassword(KeychainV2& keychain)
 KeychainPassword::~KeychainPassword() = default;
 
 std::string KeychainPassword::GetPassword() const {
-  // AGENT BUILD: a file-provided key wins over the Keychain (see ReadAgentKeyFile).
+  // AGENT BUILD precedence: $CHROMIUM_SAFE_STORAGE_KEY (portable, keychain-free)
+  // > key file > the OS Keychain. The env var wins so a roaming/synced profile
+  // decrypts identically on every machine without any local state.
+  if (std::string env_key; ReadAgentKeyEnv(&env_key)) {
+    return env_key;
+  }
+  // A file-provided key wins over the Keychain (see ReadAgentKeyFile).
   if (std::string file_key; ReadAgentKeyFile(&file_key)) {
     return file_key;
   }

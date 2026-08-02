@@ -16,6 +16,13 @@
 //   CHROMIUM_SENDKEYS_OUT     build output dir      (default: out/Default)
 //   CHROMIUM_SENDKEYS_DIR     command spool dir     (default: ~/chrome-agent-sendkeys)
 //   CHROMIUM_AGENT_PROFILE    --user-data-dir       (default: ~/chrome-agent-profile)
+//   CHROMIUM_AGENT_HEADLESS   1/true -> headless    (default: headful)
+//
+// Headless vs headful, same setup, no rebuild: default is headful (a real
+// window). Pass `--headless` (or set CHROMIUM_AGENT_HEADLESS=1) to run the
+// exact same profile/spool/agent protocol with no window -- for servers, CI,
+// or a roaming synced profile on a box with no display. The spool watcher,
+// tabId registry, eval, and screenshots all work identically in both modes.
 //
 // The producer CLI (chromesendkeys.js) is already OS-agnostic; this launcher
 // is the missing piece that makes the whole thing "run anywhere".
@@ -76,6 +83,18 @@ function main() {
   const passthrough = sep === -1 ? [] : argv.slice(sep + 1);
   const startUrl = head.find((a) => !a.startsWith('-'));
 
+  // Headless is opt-in via a `--headless` flag (before `--`) or
+  // CHROMIUM_AGENT_HEADLESS=1/true. Same binary, profile, and agent protocol;
+  // only the window presence changes. `--headless=new` is the modern headless
+  // that shares the full browser feature set (not the legacy shell).
+  const envHeadless = /^(1|true|yes)$/i.test(
+    process.env.CHROMIUM_AGENT_HEADLESS || '',
+  );
+  const flagHeadless = head.some(
+    (a) => a === '--headless' || a === '--headless=new',
+  );
+  const headless = envHeadless || flagHeadless;
+
   // Keep the agent browser to a single, predictable window/tab: no first-run
   // welcome tab, no default-browser prompt, no crash-restore bubble stealing
   // foreground. Without these the official build opens an extra welcome tab
@@ -91,8 +110,14 @@ function main() {
     // input (e.g. BlackHole) via getUserMedia({audio:{deviceId}}) and route
     // output via HTMLMediaElement.setSinkId(deviceId). Real devices, faked UI.
     '--use-fake-ui-for-media-stream',
-    ...passthrough,
   ];
+  if (headless) {
+    // Modern headless: full-featured, no window. Force software/consistent
+    // rasterization so offscreen tab screenshots (CopyFromSurface) still work
+    // where there is no GPU/display, mirroring the background-capture path.
+    args.push('--headless=new');
+  }
+  args.push(...passthrough);
   if (startUrl) {
     args.push(startUrl);
   }
@@ -100,6 +125,7 @@ function main() {
   console.error(
     `chromium-agent: launching\n` +
       `  binary : ${binary}\n` +
+      `  mode   : ${headless ? 'headless (--headless=new)' : 'headful'}\n` +
       `  spool  : ${spoolDir}  (CHROMIUM_SENDKEYS_DIR)\n` +
       `  profile: ${profileDir}` +
       (startUrl ? `\n  url    : ${startUrl}` : ''),
