@@ -23,6 +23,7 @@
 #include "base/threading/platform_thread.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
+#include "media/audio/agent_audio_tap_bridge.h"
 #include "media/audio/audio_device_description.h"
 #include "media/base/audio_timestamp_helper.h"
 #include "media/media_buildflags.h"
@@ -519,6 +520,17 @@ int OutputController::OnMoreData(base::TimeDelta delay,
         snooper->OnData(*dest, reference_time, volume_);
       }
     }
+  }
+
+  // AGENT BUILD: mirror this controller's rendered output into the process-
+  // global tap bridge so the sendkeys /tap WebSocket can stream it to an agent
+  // (e.g. to "hear" a Teams call). Coarse: every controller mixes into one mono
+  // ring -- fine for the single-meeting-tab use case. The enabled() check is a
+  // relaxed atomic, so the realtime path pays ~nothing when the tap is off.
+  if (!dest->is_bitstream_format() &&
+      media::AgentAudioTapBridge::Get().enabled()) {
+    media::AgentAudioTapBridge::Get().PushRenderedAudio(*dest,
+                                                        params_.sample_rate());
   }
 
   const int frames =

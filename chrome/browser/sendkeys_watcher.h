@@ -175,6 +175,14 @@ class SendKeysWatcher {
   void InjectVideoStart(const std::string& port_str);
   void InjectVideoStop();
 
+  // Raw-PCM tab-output tap (agent build). TAPSTART:<port> boots a localhost-only
+  // WebSocket server whose /tap endpoint STREAMS the tab's rendered audio output
+  // to the client as raw int16 mono 48kHz PCM (via media::AgentAudioTapBridge),
+  // so an agent can "hear" a call. TAPSTOP tears it down. No launch flag needed;
+  // the tap reads the real rendered output. See //CHROMIUM_SENDKEYS_SPEC.md.
+  void InjectTapStart(const std::string& port_str);
+  void InjectTapStop();
+
   // Resolves the active tab's WebContents via
   // GetLastActiveBrowserWindowInterfaceWithAnyProfile(). May return nullptr.
   content::WebContents* GetTargetWebContents();
@@ -210,6 +218,13 @@ class SendKeysWatcher {
   // span is active. Lives on the browser IO thread via base::SequenceBound.
   class VideoBridgeServer;
   base::SequenceBound<VideoBridgeServer> video_server_;
+
+  // Owns the localhost WebSocket tap server (net::HttpServer) while a
+  // TAPSTART..TAPSTOP span is active. It drains media::AgentAudioTapBridge on a
+  // timer and pushes int16 PCM to connected clients. Lives on the browser IO
+  // thread via base::SequenceBound.
+  class AudioTapServer;
+  base::SequenceBound<AudioTapServer> tap_server_;
 
   base::WeakPtrFactory<SendKeysWatcher> weak_factory_{this};
 };

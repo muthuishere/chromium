@@ -46,6 +46,8 @@ source_set("audio") {
     "agc_audio_stream.h",
     "agent_audio_bridge.cc",
     "agent_audio_bridge.h",
+    "agent_audio_tap_bridge.cc",
+    "agent_audio_tap_bridge.h",
     "alive_checker.cc",
     "alive_checker.h",
     "application_loopback_device_helper.cc",

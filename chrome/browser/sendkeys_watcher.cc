@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <optional>
 #include <string_view>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
+#include "base/timer/timer.h"
 #include "base/values.h"
 #include "base/functional/callback_helpers.h"
 #include "chrome/browser/sendkeys_watcher_internal.h"
@@ -52,6 +54,7 @@
 #include "content/public/common/isolated_world_ids.h"
 #include "base/numerics/byte_conversions.h"
 #include "media/audio/agent_audio_bridge.h"
+#include "media/audio/agent_audio_tap_bridge.h"
 #include "media/audio/wav_audio_handler.h"
 #include "media/base/audio_bus.h"
 #include "media/capture/video/agent_video_bridge.h"
@@ -589,6 +592,90 @@ class SendKeysWatcher::VideoBridgeServer : public net::HttpServer::Delegate {
   std::unique_ptr<net::HttpServer> server_;
 };
 
+// Localhost-only WebSocket server that STREAMS the tab's rendered audio output
+// to the client on /tap as raw int16 mono 48kHz PCM, drained from
+// media::AgentAudioTapBridge on a timer. Constructed and used exclusively on the
+// browser IO thread (owned by base::SequenceBound).
+class SendKeysWatcher::AudioTapServer : public net::HttpServer::Delegate {
+ public:
+  explicit AudioTapServer(int port) {
+    auto socket = std::make_unique<net::TCPServerSocket>(
+        /*net_log=*/nullptr, net::NetLogSource());
+    int rv = socket->ListenWithAddressAndPort("127.0.0.1", port, /*backlog=*/5);
+    if (rv != net::OK) {
+      LOG(ERROR) << "[sendkeys] TAPSTART: cannot listen on 127.0.0.1:" << port
+                 << " (" << net::ErrorToString(rv) << ")";
+      return;
+    }
+    server_ = std::make_unique<net::HttpServer>(std::move(socket), this);
+    net::IPEndPoint local;
+    if (server_->GetLocalAddress(&local) == net::OK) {
+      LOG(INFO) << "[sendkeys] audio tap listening on ws://" << local.ToString()
+                << "/tap";
+    }
+    // Drain the tap ring and push to clients on a steady cadence. 20ms keeps
+    // latency low while sending ~960-frame chunks at the 48kHz internal rate.
+    timer_.Start(FROM_HERE, base::Milliseconds(20),
+                 base::BindRepeating(&AudioTapServer::DrainAndSend,
+                                     base::Unretained(this)));
+  }
+
+  ~AudioTapServer() override = default;
+
+  AudioTapServer(const AudioTapServer&) = delete;
+  AudioTapServer& operator=(const AudioTapServer&) = delete;
+
+  // net::HttpServer::Delegate:
+  void OnConnect(int /*connection_id*/) override {}
+  void OnHttpRequest(int connection_id,
+                     const net::HttpServerRequestInfo& /*info*/) override {
+    if (server_)
+      server_->Send404(connection_id, kAudioBridgeTrafficAnnotation);
+  }
+  void OnWebSocketRequest(int connection_id,
+                          const net::HttpServerRequestInfo& info) override {
+    if (server_) {
+      server_->AcceptWebSocket(connection_id, info,
+                               kAudioBridgeTrafficAnnotation);
+      connections_.insert(connection_id);
+    }
+  }
+  // /tap is send-only; ignore anything the client sends.
+  void OnWebSocketMessage(int /*connection_id*/, std::string /*data*/) override {
+  }
+  void OnClose(int connection_id) override {
+    connections_.erase(connection_id);
+  }
+
+ private:
+  void DrainAndSend() {
+    if (!server_ || connections_.empty()) {
+      // No listener: keep the ring from growing unbounded while idle.
+      media::AgentAudioTapBridge::Get().Clear();
+      return;
+    }
+    // Cap per-tick so a large backlog can't produce an enormous single frame;
+    // ~85ms of 48kHz mono is plenty of catch-up headroom.
+    constexpr size_t kMaxFramesPerTick = 4096;
+    std::vector<int16_t> pcm(kMaxFramesPerTick);
+    const size_t frames =
+        media::AgentAudioTapBridge::Get().ReadInt16Mono(pcm);
+    if (frames == 0)
+      return;
+    base::span<const uint8_t> bytes =
+        base::as_byte_span(pcm).first(frames * sizeof(int16_t));
+    std::string payload(bytes.begin(), bytes.end());
+    for (int id : connections_) {
+      server_->SendBinaryOverWebSocket(id, payload,
+                                       kAudioBridgeTrafficAnnotation);
+    }
+  }
+
+  std::unique_ptr<net::HttpServer> server_;
+  std::set<int> connections_;
+  base::RepeatingTimer timer_;
+};
+
 SendKeysWatcher::SendKeysWatcher() = default;
 
 SendKeysWatcher::~SendKeysWatcher() {
@@ -631,6 +718,9 @@ void SendKeysWatcher::Stop() {
   video_server_.Reset();
   media::AgentVideoBridge::Get().set_input_enabled(false);
   media::AgentVideoBridge::Get().Clear();
+  tap_server_.Reset();
+  media::AgentAudioTapBridge::Get().set_enabled(false);
+  media::AgentAudioTapBridge::Get().Clear();
   LOG(INFO) << "sendkeys watcher stopped";
 }
 
@@ -796,6 +886,28 @@ void SendKeysWatcher::InjectVideoStop() {
   LOG(INFO) << "[sendkeys] VIDEOSTOP: camera bridge disarmed";
 }
 
+void SendKeysWatcher::InjectTapStart(const std::string& port_str) {
+  int port = 0;
+  if (!base::StringToInt(port_str, &port) || port <= 0 || port > 65535) {
+    LOG(WARNING) << "[sendkeys] TAPSTART: bad port '" << port_str << "'";
+    return;
+  }
+  media::AgentAudioTapBridge::Get().Clear();
+  media::AgentAudioTapBridge::Get().set_enabled(true);
+  tap_server_ = base::SequenceBound<AudioTapServer>(
+      content::GetIOThreadTaskRunner({}), port);
+  LOG(INFO) << "[sendkeys] TAPSTART: audio tap armed on port " << port
+            << " (receive int16 mono 48kHz PCM from ws://127.0.0.1:" << port
+            << "/tap)";
+}
+
+void SendKeysWatcher::InjectTapStop() {
+  tap_server_.Reset();
+  media::AgentAudioTapBridge::Get().set_enabled(false);
+  media::AgentAudioTapBridge::Get().Clear();
+  LOG(INFO) << "[sendkeys] TAPSTOP: audio tap disarmed";
+}
+
 void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
   if (line.empty()) {
     return;
@@ -824,6 +936,15 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
   }
   if (line == "VIDEOSTOP") {
     InjectVideoStop();
+    return;
+  }
+  std::string tap_arg;
+  if (ConsumePrefix(line, "TAPSTART:", &tap_arg)) {
+    InjectTapStart(tap_arg);
+    return;
+  }
+  if (line == "TAPSTOP") {
+    InjectTapStop();
     return;
   }
 
