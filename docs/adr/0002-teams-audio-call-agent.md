@@ -1,7 +1,15 @@
 # ADR 0002 — Teams audio-call agent (speak + listen in a live meeting)
 
-- **Status:** Proposed — design accepted, phased build not yet started
-- **Date:** 2026-08-03
+- **Status:** **Layers 1 + 2 BUILT and verified. Layer 3 (the loop) is what remains.**
+  Re-verified 2026-08-10 by running `chrome-agent-tap-selftest.cjs` against the shipped
+  `out/Default`: **5/5 pass** — tap armed streams 118,016 PCM frames at RMS 0.2121 (matches the
+  440 Hz @ gain 0.3 reference), tap disarmed streams 0. So the fork can already HEAR and SPEAK;
+  what is missing is the glue that connects the two.
+  ⚠️ The old status said "phased build not yet started" and the table below still calls `/tap`
+  "designed, NOT built". Both were stale within hours of being written (`/tap` landed 2026-08-03
+  18:59 in `f57b84dee2`, the ADR was authored earlier the same day). Left visible rather than
+  silently rewritten, because an agent trusting that line would rebuild something that works.
+- **Date:** 2026-08-03 (status re-verified 2026-08-10)
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chromium-agent session)
 - **Severity:** MEDIUM — new capability, not a regression. Unblocks "an agent that
@@ -30,7 +38,7 @@ ElevenLabs (voice) + Claude (brain) + a speech-to-text engine (ears) around it.
 | Binary WS **encode** (server→client) | `EncodeBinaryFrame`, `SendBinaryOverWebSocket` | ✅ shipped (needed by `/tap`) |
 | Deterministic per-tab targeting | UUID tab registry, `TAB:<id>\|…` | ✅ shipped (ADR 0001) |
 
-### The one missing fork piece
+### The formerly-missing fork piece — NOW SHIPPED (see Status; the row below is kept as written)
 
 | Capability | Mechanism | Status |
 |---|---|---|
