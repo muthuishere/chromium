@@ -1,6 +1,6 @@
 ---
 name: voice-agent
-description: The standalone voice brain for the Teams audio-call agent — speak (ElevenLabs TTS in the kathir_deemwar clone) and listen (ElevenLabs Scribe STT) from the shell, no Teams/browser needed. Layer 1 of ADR 0002.
+description: The voice organ for the Teams audio-call agent — speak (ElevenLabs TTS in the kathir_deemwar clone), listen (ElevenLabs Scribe STT), and run the full half-duplex call loop (call-loop.cjs) that hears a participant through the fork's /tap and answers through /mic. Layers 1 and 3 of ADR 0002.
 ---
 
 # voice-agent (sample skill)
@@ -33,7 +33,29 @@ node voice-agent.cjs voices
 
 Verified round-trip: `speak … out.wav` → `listen out.wav` returns the same words.
 
-## How it becomes the Teams agent (next layers)
+## The full loop (Layer 3) — BUILT and verified 2026-08-10
+
+`call-loop.cjs` joins the ears to the mouth: `/tap` -> VAD -> Scribe -> brain -> TTS -> `/mic`.
+
+```bash
+export CHROMIUM_SENDKEYS_DIR=<the fork's spool dir>
+node call-loop.cjs run --tap 39621 --mic 39622 --brain "claude -p" --voice muthu
+node call-loop.cjs selftest              # 8/8, no browser, no network, no key
+node call-loop-integration.cjs           # 8/8 end-to-end against the real fork
+```
+
+It is **half-duplex on purpose**: the tap carries our own TTS, so the loop stops
+listening while it speaks. Without that gate it transcribes itself and answers itself.
+The brain is any command reading the transcript on stdin and printing a reply.
+
+Tunables: `VOICE_VAD_RMS` (default 0.02) and `VOICE_VAD_SILENCE_MS` (900). A noisy room
+needs the RMS raised; a slow speaker needs the silence window raised.
+
+Proven end-to-end: a sentence spoken into a tab came back through `/tap`, VAD cut 2140ms,
+Scribe returned all 9 words exactly, and the reply went out `/mic`. A silence control in
+both suites proves the VAD does not invent utterances.
+
+## How it becomes the Teams agent (remaining glue)
 - **The brain** is Claude (this session / a headless turn) — voice-agent is only
   the ears+mouth. Don't use ElevenLabs' bundled conversational LLM.
 - **Speak into a call:** the `.wav` output feeds the fork's shipped mic bridge —

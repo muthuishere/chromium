@@ -1,10 +1,13 @@
 # ADR 0002 — Teams audio-call agent (speak + listen in a live meeting)
 
-- **Status:** **Layers 1 + 2 BUILT and verified. Layer 3 (the loop) is what remains.**
+- **Status:** **Layers 1, 2 AND 3 BUILT and verified — the loop runs end to end.**
   Re-verified 2026-08-10 by running `chrome-agent-tap-selftest.cjs` against the shipped
   `out/Default`: **5/5 pass** — tap armed streams 118,016 PCM frames at RMS 0.2121 (matches the
-  440 Hz @ gain 0.3 reference), tap disarmed streams 0. So the fork can already HEAR and SPEAK;
-  what is missing is the glue that connects the two.
+  440 Hz @ gain 0.3 reference), tap disarmed streams 0. The loop itself (skills/voice-agent/call-loop.cjs) landed 2026-08-10 and is verified
+  end-to-end: a sentence spoken into a tab was heard through /tap, VAD cut 2140ms, Scribe
+  returned all 9 words exactly, and the reply went back out /mic (8/8, plus a silence control).
+  What remains is only the Teams-specific glue: creating/joining the meeting and handling the
+  pre-join UI. The audio problem is solved.
   ⚠️ The old status said "phased build not yet started" and the table below still calls `/tap`
   "designed, NOT built". Both were stale within hours of being written (`/tap` landed 2026-08-03
   18:59 in `f57b84dee2`, the ADR was authored earlier the same day). Left visible rather than
@@ -42,10 +45,10 @@ ElevenLabs (voice) + Claude (brain) + a speech-to-text engine (ears) around it.
 
 | Capability | Mechanism | Status |
 |---|---|---|
-| **Audio IN** — tap the tab's rendered output → agent | `TAPSTART:<port>` → `ws://127.0.0.1:<port>/tap`; snoop `audio::OutputController` (audio is in-process) → mono int16 → binary WS | ⚠️ **designed, NOT built** — see the `/tap` plan in memory `chromium-agent-audio-websocket-bridge` |
+| **Audio IN** — tap the tab's rendered output → agent | `TAPSTART:<port>` → `ws://127.0.0.1:<port>/tap`; snoop `audio::OutputController` (audio is in-process) → mono int16 → binary WS | ✅ **SHIPPED + verified** 2026-08-03 (`f57b84dee2`), re-proved 5/5 on 2026-08-10. (This cell read "designed, NOT built" until 08-10 — it was already false when written.) |
 
-Without `/tap` the agent can **speak** into a call but cannot **hear** it. `/tap` is the
-critical path and is the only fork build this ADR requires.
+`/tap` was the critical path and the only fork build this ADR required. It is done, and so is
+the Layer 3 loop on top of it — the agent both speaks and hears today.
 
 ---
 
@@ -94,7 +97,10 @@ Build `/tap` per the plan in `chromium-agent-audio-websocket-bridge`:
 
 Verify: play known audio in a tab, confirm the client receives int16 mono PCM matching it.
 
-### Layer 3 — the Teams glue (skill + chrome-agent)
+### Layer 3 — the Teams glue (skill + chrome-agent) — LOOP BUILT 2026-08-10
+
+The audio loop below is implemented in `skills/voice-agent/call-loop.cjs` and verified end to
+end. Steps 1-5 are done; what is still open is only meeting create/join and the pre-join UI.
 
 - **Create meeting + link:** `apl` / Graph `POST /me/onlineMeetings` → `joinWebUrl`; share
   the link over email/Teams/Telegram to invitees.
