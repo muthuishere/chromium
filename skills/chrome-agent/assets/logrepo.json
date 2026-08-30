@@ -1,0 +1,7 @@
+{
+  "transport": "github",
+  "log_repo": "muthuishere/agent-skill-log-data",
+  "sync_delay_minutes": 10,
+  "max_age_minutes": 60,
+  "default_source": "chrome-agent"
+}

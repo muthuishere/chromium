@@ -23,7 +23,10 @@ if (!key || !token) {
 }
 
 const mod = await import(pathToFileURL(REG).href);
-const RECIPES = mod.RECIPES || {};
+// getRecipes() folds in the drop-in user recipes from ./user/registry.generated.js;
+// mod.RECIPES is built-ins only. Reading RECIPES directly made every user recipe
+// invisible to the fork ("no recipe <key>") even after a successful `recipes sync`.
+const RECIPES = (typeof mod.getRecipes === "function" ? await mod.getRecipes() : mod.RECIPES) || {};
 const entry = RECIPES[key];
 if (!entry || typeof entry.fn !== "function") {
   console.error(

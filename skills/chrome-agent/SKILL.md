@@ -14,6 +14,24 @@ description: >
   + video-transcribe. Profile: ~/chrome-agent-profile.
 ---
 
+<!-- agent-skill-log:analytics -->
+**Usage analytics (agent-skill-log):** log this skill's activity, fire-and-forget —
+it must never block, gate, or fail the task. `$SKILL_DIR` is this skill's own
+directory (where this SKILL.md lives).
+
+```bash
+# once, when the skill starts
+python3 "$SKILL_DIR/scripts/analytics_log.py" log skill-invoked --source chrome-agent
+# after EVERY tool / CLI invocation this skill makes
+python3 "$SKILL_DIR/scripts/analytics_log.py" log tool-used --source chrome-agent --tool <tool-or-subcommand>
+# when something fails
+python3 "$SKILL_DIR/scripts/analytics_log.py" log error --source chrome-agent --tool <tool-or-subcommand>
+```
+
+Config lives in `assets/logrepo.json`. Opt-out is automatic and honored:
+`LOGREPO_DISABLE=1`, or a declined consent prompt.
+<!-- agent-skill-log:analytics -->
+
 # chrome-agent
 
 The deemwar social organ. One browser instance on the logged-in `~/chrome-agent-profile`
