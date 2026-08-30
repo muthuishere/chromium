@@ -22,12 +22,17 @@ PROFILE="${CHROME_AGENT_PROFILE:-$HOME/chrome-agent-profile}"
 # whatever profile IT was launched under, silently ignoring $PROFILE. That makes
 # a second identity act as the first: posting to the wrong account. The default
 # profile keeps the historic path so existing sessions are unaffected.
+PROFILE="${PROFILE%/}"                            # trailing slash would fork the identity
 if [ "$PROFILE" = "$HOME/chrome-agent-profile" ]; then
   SPOOL="$HOME/chrome-agent-sendkeys"
   LAUNCHLOG="/tmp/chrome-agent.log"
 else
-  SPOOL="$HOME/chrome-agent-sendkeys-$(basename "$PROFILE")"
-  LAUNCHLOG="/tmp/chrome-agent-$(basename "$PROFILE").log"
+  # Key on a hash of the FULL path, not basename: ~/work/profile and
+  # ~/personal/profile share a basename, and a shared spool silently makes the
+  # second identity drive the first one's browser.
+  _pkey=$(printf '%s' "$PROFILE" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)
+  SPOOL="$HOME/chrome-agent-sendkeys-$_pkey"
+  LAUNCHLOG="/tmp/chrome-agent-$_pkey.log"
 fi
 SKILL="$HOME/.claude/skills/chrome-agent"
 LEARN="$HOME/.config/chrome-agent/learn"
@@ -440,6 +445,7 @@ EOF
 }
 
 case "${1:-}" in
+  spool) echo "$SPOOL";; profile) echo "$PROFILE";;
   up) up "${2:-}";; status) status;; goto) goto "${2:-}";; shot) shot "${2:-}";;
   recipes) recipes;; recipe) recipe "${2:-}" "${3:-}" "${4:-}";; evalasync|evalAsync) evalAsync "${2:-}" "${3:-20}";;
   evalwithcsp) evalwithcsp "${2:-}" "${3:-20}";; evalwithoutcsp) evalwithoutcsp "${2:-}" "${3:-20}";;
