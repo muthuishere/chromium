@@ -16,8 +16,17 @@ set -uo pipefail
 FORK="$HOME/muthu/gitworkspace/chromium"
 CJS="$FORK/chromesendkeys.cjs"
 LAUNCH="$FORK/chromium-agent-launch.cjs"
-SPOOL="$HOME/chrome-agent-sendkeys"
 PROFILE="${CHROME_AGENT_PROFILE:-$HOME/chrome-agent-profile}"
+# ONE SPOOL PER PROFILE. The spool dir is the IPC channel to a running browser,
+# so a shared spool means `up` finds the existing instance and reuses it — with
+# whatever profile IT was launched under, silently ignoring $PROFILE. That makes
+# a second identity act as the first: posting to the wrong account. The default
+# profile keeps the historic path so existing sessions are unaffected.
+if [ "$PROFILE" = "$HOME/chrome-agent-profile" ]; then
+  SPOOL="$HOME/chrome-agent-sendkeys"
+else
+  SPOOL="$HOME/chrome-agent-sendkeys-$(basename "$PROFILE")"
+fi
 SKILL="$HOME/.claude/skills/chrome-agent"
 LEARN="$HOME/.config/chrome-agent/learn"
 LEDGER="$HOME/.config/chrome-agent/actions.ndjson"
