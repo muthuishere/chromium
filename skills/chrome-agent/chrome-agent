@@ -24,8 +24,10 @@ PROFILE="${CHROME_AGENT_PROFILE:-$HOME/chrome-agent-profile}"
 # profile keeps the historic path so existing sessions are unaffected.
 if [ "$PROFILE" = "$HOME/chrome-agent-profile" ]; then
   SPOOL="$HOME/chrome-agent-sendkeys"
+  LAUNCHLOG="/tmp/chrome-agent.log"
 else
   SPOOL="$HOME/chrome-agent-sendkeys-$(basename "$PROFILE")"
+  LAUNCHLOG="/tmp/chrome-agent-$(basename "$PROFILE").log"
 fi
 SKILL="$HOME/.claude/skills/chrome-agent"
 LEARN="$HOME/.config/chrome-agent/learn"
@@ -334,7 +336,11 @@ _sweep_spool(){
 }
 up(){ local url="${1:-https://www.linkedin.com/feed/}"
   _sweep_spool
-  if ! cj eval "1" >/dev/null 2>&1; then CHROMIUM_AGENT_PROFILE="$PROFILE" node "$LAUNCH" "$url" >/tmp/chrome-agent.log 2>&1 & sleep 12
+  # CHROMIUM_SENDKEYS_DIR must be passed too: the browser watches the spool it is
+  # given (chromium-agent-launch.cjs reads it, default ~/chrome-agent-sendkeys).
+  # Without it a non-default profile writes commands to its own spool while the
+  # browser watches the default one, and every command hangs forever.
+  if ! cj eval "1" >/dev/null 2>&1; then CHROMIUM_AGENT_PROFILE="$PROFILE" CHROMIUM_SENDKEYS_DIR="$SPOOL" node "$LAUNCH" "$url" >"$LAUNCHLOG" 2>&1 & sleep 12
   else cj goto "$url" >/dev/null 2>&1; sleep 3; fi
   val "navigator.webdriver===false ? 'undetected' : 'DETECTED'"; }
 # goto navigates THIS session's dedicated tab (creating it via NEWTAB on the first navigation),
