@@ -17,24 +17,31 @@ FORK="$HOME/muthu/gitworkspace/chromium"
 CJS="$FORK/chromesendkeys.cjs"
 LAUNCH="$FORK/chromium-agent-launch.cjs"
 PROFILE="${CHROME_AGENT_PROFILE:-$HOME/chrome-agent-profile}"
-# ONE SPOOL PER PROFILE, AND NO PROFILE IS SPECIAL. The spool dir is the IPC
-# channel to a running browser, so a shared spool means `up` finds the existing
-# instance and reuses it — with whatever profile IT was launched under, silently
-# ignoring $PROFILE. That makes a second identity act as the first: posting to
-# the wrong account.
+# ONE SPOOL PER PROFILE. The spool dir is the IPC channel to a running browser,
+# so a shared spool means `up` finds the existing instance and reuses it — with
+# whatever profile IT was launched under, silently ignoring $PROFILE. That makes
+# a second identity act as the first: posting to the wrong account.
 #
-# The default profile is keyed exactly like every other one. Special-casing it
-# is what let two bugs hide: a trailing slash fell out of the special branch and
-# forked one profile into two spools, and the "other" branch keyed on basename
-# so ~/work/profile and ~/personal/profile collided. One rule, no exceptions.
+# The DEFAULT profile keeps the historic paths (~/chrome-agent-sendkeys,
+# /tmp/chrome-agent.log) so every existing script, session and running browser
+# that references them keeps working. Any OTHER profile is keyed on a hash of
+# its FULL path.
 #
-# The DEFAULT PROFILE PATH is unchanged, so plain `chrome-agent` with no
-# environment still drives ~/chrome-agent-profile; only its spool name is now
-# derived like the rest.
-PROFILE="${PROFILE%/}"                            # trailing slash would fork the identity
-_pkey=$(printf '%s' "$PROFILE" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)
-SPOOL="$HOME/chrome-agent-sendkeys-$_pkey"
-LAUNCHLOG="/tmp/chrome-agent-$_pkey.log"
+# The trailing slash is stripped BEFORE the comparison. Omitting that is what
+# made the earlier version of this special case wrong: `~/chrome-agent-profile/`
+# fell through to the hashed branch and forked one profile into two spools and
+# two Chromium instances contending for the same user-data-dir. Hashing the full
+# path (not the basename) is the other fix: ~/work/profile and ~/personal/profile
+# share a basename and would otherwise collide onto one spool.
+PROFILE="${PROFILE%/}"
+if [ "$PROFILE" = "$HOME/chrome-agent-profile" ]; then
+  SPOOL="$HOME/chrome-agent-sendkeys"
+  LAUNCHLOG="/tmp/chrome-agent.log"
+else
+  _pkey=$(printf '%s' "$PROFILE" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)
+  SPOOL="$HOME/chrome-agent-sendkeys-$_pkey"
+  LAUNCHLOG="/tmp/chrome-agent-$_pkey.log"
+fi
 SKILL="$HOME/.claude/skills/chrome-agent"
 LEARN="$HOME/.config/chrome-agent/learn"
 LEDGER="$HOME/.config/chrome-agent/actions.ndjson"
