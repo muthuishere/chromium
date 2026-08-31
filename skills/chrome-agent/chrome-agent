@@ -45,7 +45,14 @@ fi
 SKILL="$HOME/.claude/skills/chrome-agent"
 LEARN="$HOME/.config/chrome-agent/learn"
 LEDGER="$HOME/.config/chrome-agent/actions.ndjson"
-mkdir -p "$SPOOL" "$LEARN" "$(dirname "$LEDGER")"
+# Pure queries must not touch the filesystem. `spool` and `profile` exist so a
+# caller can VERIFY which spool a profile resolves to; creating the directory as
+# a side effect of asking turns a read-only probe into a mutation, and litters a
+# dir per question.
+case "${1:-}" in
+  spool|profile) ;;
+  *) mkdir -p "$SPOOL" "$LEARN" "$(dirname "$LEDGER")" ;;
+esac
 
 # cj — run the engine CLI. CRASH-VISIBLE (2026-07-29): the old `2>/dev/null | tail -1`
 # swallowed engine crashes into an EMPTY STRING, indistinguishable from "nothing happened" —
