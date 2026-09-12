@@ -2,6 +2,7 @@
 verbs:
   listing: chrome-agent recipe reddit:listing
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://www.reddit.com/
 ---
 
 # reddit.com — read

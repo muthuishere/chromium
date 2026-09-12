@@ -1,0 +1,37 @@
+{
+  "domain": "medium.com",
+  "aliases": [
+    "medium"
+  ],
+  "home": "https://medium.com/",
+  "login": {
+    "url": "https://medium.com/m/signin",
+    "note": "Medium prefers passwordless: Google/Facebook/Apple/X SSO, or an emailed magic sign-in link with no password at all. The magic-link path means the human needs their mailbox open, and the link must be opened IN THIS PROFILE's browser or the session lands somewhere else.",
+    "twofa": false
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://medium.com/m/signout",
+    "note": "Hitting it navigates to the signed-out home page. It clears the medium.com session only — a custom-domain publication the profile signed into separately may keep its own."
+  },
+  "auth": {
+    "probe_url": "https://medium.com/",
+    "probe_js": "// Medium is a React app that ships its Apollo cache inline, and the viewer sits in it.\n// Cookies are the wrong evidence twice over: `sid` is HttpOnly (invisible while a session is live)\n// and `uid` outlives sign-out (visible while there is no session) — so document.cookie can be wrong\n// in BOTH directions here. Never gate on it.\nconst st = (() => { try { return window.__APOLLO_STATE__ || window.__PRELOADED_STATE__ || null; } catch (e) { return null; } })();\nconst fromState = (() => {\n  try {\n    if (!st) return null;\n    const rq = st.ROOT_QUERY || {};\n    if (rq.viewer === null) return false;                       // Apollo says it outright: no viewer\n    const ref = rq.viewer && (rq.viewer.__ref || rq.viewer.id);\n    if (ref && st[ref] && (st[ref].username || st[ref].name)) return st[ref].username || st[ref].name;\n    const c = st.client || {};\n    if (c.userId) return 'userId:' + c.userId;\n    return null;\n  } catch (e) { return null; }\n})();\nif (typeof fromState === 'string') return {signed_in:true, as: fromState};\n// Ask Medium's own who-am-I. TRAP: the internal /_/api/* endpoints prepend an XSSI guard\n// (`])}while(1);</x>`) to the JSON, so r.json() THROWS on a perfectly good reply. Read it as text\n// and cut everything before the first '{'.\ntry {\n  const r = await fetch('/_/api/users/self', {credentials:'include', headers:{accept:'application/json'}});\n  if (r.status === 401 || r.status === 403) return {signed_in:false, why:'users/self ' + r.status};\n  const t = await r.text();\n  const i = t.indexOf('{');\n  const j = i < 0 ? null : JSON.parse(t.slice(i));\n  const u = (j && j.payload && (j.payload.user || j.payload.value)) || null;\n  if (u && (u.username || u.userId)) return {signed_in:true, as: u.username || ('userId:' + u.userId)};\n  return {signed_in:false, why:'users/self returned no user'};\n} catch (e) {\n  if (fromState === false) return {signed_in:false, why:'apollo ROOT_QUERY.viewer is null'};\n  const av = document.querySelector('[data-testid=\"headerAvatar\"], [aria-label=\"user options menu\"]');\n  return av ? {signed_in:true, why:'WEAK: header avatar present, no viewer state and users/self failed'}\n            : {signed_in:false, why:'no viewer state, no avatar, users/self failed: ' + e.message};\n}"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://medium.com/"
+  },
+  "write": [],
+  "traps": [
+    "`sid` is HttpOnly so document.cookie cannot see the live session, AND `uid` is left behind after sign-out so document.cookie can claim a session that no longer exists. Cookies are wrong in both directions here — this is the worst site in this set to cookie-check.",
+    "Cloudflare fronts medium.com and answers a plain non-browser request with HTTP 403 (observed here 2026-09-12). Reads must run inside the real browser; curl-style fetching is not a fallback.",
+    "The internal /_/api/* endpoints prefix their JSON with an XSSI guard (`])}while(1);</x>`), so response.json() throws on a completely healthy reply. Read text, cut to the first '{'.",
+    "Publication custom domains (and *.medium.com publications) render a different app shell. The Apollo state keys the probe looks for may simply not exist there, so always probe medium.com itself, never the article's vanity domain.",
+    "Medium's inline state global has changed name over the years (__APOLLO_STATE__, __PRELOADED_STATE__, __NEXT_DATA__). The probe tries the first two and falls through to the API rather than trusting any single one."
+  ],
+  "status": "verified",
+  "source": "agent-research",
+  "notes": "Probe strategy (a) then (b) then a deliberately-labelled-weak (c). (a) is Medium's inline Apollo cache: ROOT_QUERY.viewer resolves through __ref to the User record with the username, and an explicit null viewer is the site stating it is signed out. (b) is a credentialed same-origin GET of Medium's own who-am-I, /_/api/users/self, with the XSSI prefix stripped — it is checked for payload.user, not for a 200. (c) is a header-avatar DOM check, used only when both of the above fail and flagged in `why` as weak so nobody mistakes it for evidence. Cookies are never consulted (see traps). UNVERIFIED and the least certain of the four: medium.com answered 403 to every unauthenticated inspection from this machine, so the state-object key names and the users/self payload shape are both hypotheses from documentation and prior art. A live `verify` should print the actual globals first. A READ recipe should replay Medium's GraphQL rather than parse HTML: the app POSTs to https://medium.com/_/graphql with a `graphql-operation` header naming the query (feed, post and user queries all go through it) — capture one real request with recipe-builder and replay it; the same XSSI/403 traps apply.",
+  "probe_checked": "positive path PROVEN live 2026-09-12: ran in the fork against a signed-in session and returned a handle from the site's own state global."
+}

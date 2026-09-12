@@ -3,6 +3,7 @@ verbs:
   timeline: chrome-agent recipe x:timeline
   timeline-twitter: chrome-agent recipe x:timeline-twitter
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://x.com/
 ---
 
 # x.com — read

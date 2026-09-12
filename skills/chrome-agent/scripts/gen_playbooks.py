@@ -60,6 +60,21 @@ SHARED_TRAP = ("**One shared browser, no mutex.** Two lanes attach to a nondeter
                "  `chrome-agent goto <url>` then `chrome-agent status` before believing any read.")
 
 
+def site_files():
+    """domain -> the site definition (ADR 0004), for domains that have one."""
+    out = {}
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sites")
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            j = json.load(open(os.path.join(d, fn)))
+        except Exception:
+            continue
+        out[j.get("domain", fn[:-5])] = j
+    return out
+
+
 def collect():
     """domain -> [(key, verb, describe, is_write, source)], straight from the CLI."""
     out = {}
@@ -81,7 +96,14 @@ def write(path, body):
 def main():
     out_dir = sys.argv[1]
     sites = collect()
+    defs = site_files()
+    # A site with a definition but no recipe still deserves a playbook: login, traps and "read it
+    # with eval" is most of what an agent needs, and a missing folder reads as "we do not know this
+    # site" when in fact we do.
+    for domain in defs:
+        sites.setdefault(domain, [])
     for domain, entries in sorted(sites.items()):
+        sd = defs.get(domain, {})
         reads = sorted(e for e in entries if not e[3])
         writes = sorted(e for e in entries if e[3])
         d = os.path.join(out_dir, domain)
@@ -105,6 +127,7 @@ def main():
                     if "(" in prev:
                         stamp = prev
                     break
+        alias = ", ".join(sd.get("aliases", [])) or ALIASES.get(domain, domain.split(".")[0])
         write(meta,
               "---\ndomain: %s\naliases: %s\nstaged: true\n"
               "last_verified: %s\nsource: generated from `chrome-agent recipes --json`\n---\n\n"
@@ -112,7 +135,7 @@ def main():
               "plus chrome-agent's own verbs. A verb that is not listed does not exist — do not\n"
               "improvise one.\n\n"
               "Capability files: `read.md` · `write.md` · `login.md` · `traps.md`\n"
-              % (domain, ALIASES.get(domain, domain.split(".")[0]), stamp, domain))
+              % (domain, alias, stamp, domain))
 
         def block(es):
             return "".join(
@@ -121,8 +144,11 @@ def main():
                 for k, v, _, _, src in es)
 
         rb = block(reads) + "  eval: chrome-agent evalwithcsp '<js>'\n"
+        fixture = (sd.get("read") or {}).get("fixture_url", "")
+        if fixture:
+            rb += "  page: %s\n" % fixture
         rl = "".join("- `%s` — %s\n" % (k, dsc or "no description recorded")
-                     for k, _, dsc, _, _ in reads) or "- (no read recipe registered for this site)\n"
+                     for k, _, dsc, _, _ in reads) or ("- (no read recipe registered — read it with `evalwithcsp` from `%s`)\n" % (fixture or sd.get("home","the site root")))
         write(os.path.join(d, "read.md"),
               "---\nverbs:\n%s---\n\n# %s — read\n\n%s\n"
               "A read is a **sample**, not a set — these surfaces are personalised and paginated.\n"
@@ -149,21 +175,35 @@ def main():
                     "add a recipe to the registry first, then regenerate this playbook.\n" % domain)
         write(os.path.join(d, "write.md"), body)
 
+        lg, lo = sd.get("login") or {}, sd.get("logout") or {}
+        extra = ""
+        if lg:
+            extra = ("\n**Where:** `%s`\n\n%s\n%s\n"
+                     % (lg.get("url", "-"),
+                        lg.get("note", ""),
+                        "\n**A second factor is likely — keep the window open until it is done.**\n"
+                        if lg.get("twofa") else ""))
+        if lo:
+            m = lo.get("method", "?")
+            extra += ("\n**Sign out:** `chrome-agent logout %s` — method `%s`%s.%s\n"
+                      % (domain, m,
+                         " (`%s`)" % (lo.get("url") or lo.get("selector") or ""),
+                         ("\n\n⚠️ `cookies` is LOCAL ONLY: the site is never told, so its session stays "
+                          "alive until it expires on its own." if m == "cookies" else "")))
         write(os.path.join(d, "login.md"),
               "# %s — login\n\n**Manual, by a human, in the profile. Always** (ADR-0008).\n\n"
               "Nothing here stores, types or automates a password, and nothing touches 2FA.\n"
               "Automated sign-in is the most reliable way to get an account restricted, and a stored\n"
-              "credential would put a secret inside an agent's context.\n\n"
+              "credential would put a secret inside an agent's context.\n"
+              "%s\n"
+              "**Is this profile signed in?** `chrome-agent auth %s` — exit 0 yes, 2 no.\n"
+              "**Sign in:** `chrome-agent login %s` opens the page and types nothing.\n"
+              "On a server the window lives on a virtual display: `chrome-agent share start` (ADR 0003).\n\n"
               "**Expired session:** reads land on a login wall instead of content. That is the signal —\n"
-              "not an error, not an empty page.\n\n"
-              "**What to do:** stop and name the profile that needs a human.\n\n"
-              "```\napl accounts --check\n```\n\nDo not retry in a loop meanwhile.\n" % domain)
+              "not an error, not an empty page.\n" % (domain, extra, domain, domain))
 
-        # TRAPS: the generator owns everything ABOVE the keep-marker and nothing below it.
-        # Only the verb surface has a source of truth, so traps stay hand-written -- which used to
-        # mean a trap typed straight into this file was silently destroyed by the next run. The
-        # marker makes that block durable, and `chrome-agent promote` appends into it.
-        traps = TRAPS.get(domain, [])
+        traps = TRAPS.get(domain, []) + [t for t in (sd.get("traps") or [])
+                                         if t not in TRAPS.get(domain, [])]
         tl = "".join("- %s\n" % t for t in traps + [SHARED_TRAP])
         note = "" if traps else ("\nNo site-specific trap has been recorded yet. That means nobody has\n"
                                  "been bitten and written it down — not that this site is honest.\n")

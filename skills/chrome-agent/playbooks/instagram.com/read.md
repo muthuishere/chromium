@@ -3,6 +3,7 @@ verbs:
   post: chrome-agent recipe instagram:post
   profile: chrome-agent recipe instagram:profile
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://www.instagram.com/instagram/
 ---
 
 # instagram.com — read

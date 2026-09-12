@@ -1,0 +1,38 @@
+{
+  "domain": "stackoverflow.com",
+  "aliases": [
+    "so",
+    "stackoverflow",
+    "stack-overflow"
+  ],
+  "home": "https://stackoverflow.com/",
+  "login": {
+    "url": "https://stackoverflow.com/users/login",
+    "note": "One Stack Exchange account signs in across the network, but sign-in happens per site: the page offers Google/GitHub/Facebook SSO plus email+password, and an SSO path opens a provider window that the human must finish. A new IP or a new profile commonly adds an emailed verification link or a CAPTCHA.",
+    "twofa": false
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://stackoverflow.com/users/logout",
+    "note": "The GET only renders a confirmation page; the actual sign-out is a POST carrying the fkey, so a human clicks 'Log out'. It signs the profile out of the whole Stack Exchange network, not just stackoverflow.com."
+  },
+  "auth": {
+    "probe_url": "https://stackoverflow.com/",
+    "probe_js": "// Stack Exchange states it itself: StackExchange.options.user, written inline by StackExchange.init().\n// Do NOT gate on cookies here — the session cookies (prov, acct, the per-site auth cookie) are\n// HttpOnly, so document.cookie reports a live session as logged out. Do NOT gate on `fkey` either:\n// an ANONYMOUS page carries an fkey too (it is the request-forgery key, not a session).\nconst u = (() => { try { return (window.StackExchange && StackExchange.options && StackExchange.options.user) || null; } catch (e) { return null; } })();\nif (u && (u.userId || u.isRegistered === true)) {\n  const link = document.querySelector('a.my-profile, .s-topbar--item[href^=\"/users/\"]');\n  const name = link ? ((link.getAttribute('aria-label') || link.textContent || '').trim().split('\\n')[0]) : '';\n  return {signed_in:true, as: name || (u.userId ? 'userId:' + u.userId : undefined)};\n}\nif (u && (u.isAnonymous === true || u.isRegistered === false)) {\n  return {signed_in:false, why:'StackExchange.options.user says anonymous'};\n}\n// No config object at all: an edge-cached shell, or a route that never runs StackExchange.init.\n// /users/current follows through to the signed-in user's own profile; anonymous gets 404.\ntry {\n  const r = await fetch('/users/current', {credentials:'include', redirect:'follow'});\n  const m = (r.url || '').match(/\\/users\\/(\\d+)\\/([^/?#]+)/);\n  if (r.status === 200 && m) return {signed_in:true, as: decodeURIComponent(m[2])};\n  return {signed_in:false, why:'no StackExchange.options.user; /users/current gave ' + r.status};\n} catch (e) { return {signed_in:false, why:'no user config and /users/current failed: ' + e.message}; }"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://stackoverflow.com/questions"
+  },
+  "write": [],
+  "traps": [
+    "The session cookies (prov, acct, the per-site auth cookie) are HttpOnly — document.cookie cannot see them, and gating on them reports a live session as logged out.",
+    "StackExchange.options.user.fkey EXISTS WHEN SIGNED OUT. It is the request-forgery key, not a session. Gating on fkey is a green light for an anonymous page; gate on userId / isRegistered.",
+    "Being signed in to stackoverflow.com does not mean being signed in to superuser.com, serverfault.com or stackexchange.com. The ACCOUNT is network-wide; the SESSION is per site, and each one has its own first sign-in.",
+    "Stack Overflow fronts everything with bot protection: a plain non-browser request to stackoverflow.com/questions answers HTTP 403 (observed 2026-09-12 from this machine). Every read has to happen inside the real browser, or through api.stackexchange.com.",
+    "Because the probe is written from documentation and never run here, the 'as' it returns may be the display name with reputation glued on — treat the string as a hint until a live verify tidies the selector."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "Probe strategy (a) with (b) as a fallback. Primary evidence is the site's own inline config, StackExchange.options.user, which StackExchange.init() writes into every rendered page — userId / isRegistered / isAnonymous is the site's own verdict and needs no network call. The DOM profile link is used only to name the user, never to decide. Fallback (b) is a credentialed same-origin GET of /users/current, which lands on the signed-in user's own profile URL and 404s for anonymous — the final r.url carries both the id and the slug. Cookies are deliberately untouched. UNVERIFIED: written from documentation and the SE userscript conventions, never executed against a live tab; the exact shape of options.user and the topbar selector are the two things a live `verify` should confirm first. A READ recipe should NOT scrape HTML: api.stackexchange.com/2.3 (e.g. /questions?order=desc&sort=activity&site=stackoverflow) serves public reads unauthenticated with no bot wall, and the signed-in-only bits have their own small JSON endpoints on the site itself (/topbar/get-unread-counts returns the inbox/achievement counters for the current session)."
+}

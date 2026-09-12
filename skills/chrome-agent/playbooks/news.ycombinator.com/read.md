@@ -3,6 +3,7 @@ verbs:
   item: chrome-agent hackernews item
   top: chrome-agent hackernews top
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://news.ycombinator.com/
 ---
 
 # news.ycombinator.com — read

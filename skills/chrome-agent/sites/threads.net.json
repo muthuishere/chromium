@@ -1,0 +1,40 @@
+{
+  "domain": "threads.net",
+  "aliases": [
+    "threads",
+    "threads.com",
+    "barcelona"
+  ],
+  "home": "https://www.threads.com/",
+  "login": {
+    "url": "https://www.threads.com/login",
+    "note": "Sign-in is delegated to Instagram: the page offers 'Continue with Instagram' (an instagram.com handshake that lands back on threads.com) or a direct username/password form for a Threads-only account. A human must complete it, and the Instagram hop means the browser leaves this origin and comes back — do not close the window mid-handshake.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "a[href^=\"/settings\"]",
+    "url": "https://www.threads.com/settings/account",
+    "note": "No logout URL that can be visited. Log out through the '...' / settings menu in the web UI. Because sign-in came from Instagram, logging out of Threads does not log the profile out of instagram.com and vice versa — check both if the intent is a clean profile."
+  },
+  "auth": {
+    "probe_url": "https://www.threads.com/",
+    "probe_js": "// Threads is Meta web infrastructure: every page embeds a CurrentUserInitialData blob inside its\n// data-sjs script payloads, and it states the answer literally — ACCOUNT_ID and USER_ID are the\n// STRING \"0\" when signed out, a real numeric id plus a NAME when signed in.\n// VERIFIED on a signed-out https://www.threads.com/ document (2026-09-12):\n//   [\"CurrentUserInitialData\",[],{\"ACCOUNT_ID\":\"0\",\"USER_ID\":\"0\",\"NAME\":\"\", ...}]\n// The session cookie (sessionid) is HttpOnly and invisible to document.cookie; ds_user_id is the\n// readable half of the same session (same pattern as instagram.com) and is used here ONLY as\n// corroboration, never as the gate.\nlet uid = '', name = '';\ntry {\n  const nodes = document.querySelectorAll('script[data-sjs], script[type=\"application/json\"], script:not([src])');\n  for (const n of nodes) {\n    const t = n.textContent || '';\n    const i = t.indexOf('CurrentUserInitialData');\n    if (i === -1) continue;\n    const seg = t.slice(i, i + 2000);\n    const u = seg.match(/\"USER_ID\"\\s*:\\s*\"(\\d+)\"/);\n    if (!u) continue;\n    const nm = seg.match(/\"NAME\"\\s*:\\s*\"([^\"]*)\"/);\n    uid = u[1];\n    if (nm && nm[1]) name = nm[1];\n    if (uid !== '0') break;\n  }\n} catch (e) { return {signed_in:false, why:'could not read CurrentUserInitialData: ' + e.message}; }\nlet ck = '';\ntry { ck = document.cookie; } catch (e) { ck = ''; }\nconst ds = (ck.match(/\\bds_user_id=(\\d+)/) || [])[1] || '';\nif (uid && uid !== '0') return {signed_in:true, as: name || ('threadsid:' + uid), why: ds ? 'CurrentUserInitialData USER_ID + ds_user_id cookie' : 'CurrentUserInitialData USER_ID'};\nif (ds) return {signed_in:true, as:'igid:' + ds, why:'USER_ID is 0 in this document but a ds_user_id cookie is present — probably a cached/logged-out shell; re-probe on https://www.threads.com/ before believing either'};\nif (!uid) return {signed_in:false, why:'no CurrentUserInitialData blob in this document — wrong origin, or the page never finished serving'};\nreturn {signed_in:false, why:'CurrentUserInitialData USER_ID is \"0\"'};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://www.threads.com/"
+  },
+  "write": [],
+  "traps": [
+    "threads.net IS NOT THE ORIGIN ANY MORE. Meta moved the app to threads.com in April 2025 and reversed the redirect: https://threads.net/ answers 301 -> https://www.threads.com/ (verified 2026-09-12). Cookies, localStorage and any probe are origin-scoped, so a probe pinned to threads.net is either measuring an empty origin or measuring whatever it landed on after a cross-origin redirect. This file keeps the .net name because that is what people still type; every URL in it points at threads.com.",
+    "The CurrentUserInitialData blob is present on the SIGNED-OUT page, with ACCOUNT_ID and USER_ID as the string \"0\" and NAME as the empty string (verified on a signed-out www.threads.com document, 2026-09-12). Presence is not the verdict; USER_ID != \"0\" is. Note they are strings, not numbers.",
+    "The session cookie (sessionid) is HttpOnly and invisible to document.cookie. ds_user_id is the readable half of the same session — the same split as instagram.com — so it can corroborate a verdict but can never carry one on its own, and it can outlive the session it names.",
+    "The feed is GraphQL-hydrated after load (POST /api/graphql with a doc_id, fb_dtsg and an LSD token minted in the page). The HTML that arrives carries chrome and config, not posts, so a DOM read taken too early returns an empty feed that is indistinguishable from an account with nothing to show.",
+    "Meta serves a logged-out-looking shell to clients it does not trust, and answers rate limiting with a normal-looking 200 page and no content rather than a 429. An empty result here means 'ask again later, with the real profile', not 'there is nothing'."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "PROBE STRATEGY: (a) the site's own embedded state object. Meta web pages ship a CurrentUserInitialData record inside their data-sjs script payloads, and on Threads it answers the question literally: {\"ACCOUNT_ID\":\"0\",\"USER_ID\":\"0\",\"NAME\":\"\"} when signed out (verified against a real signed-out document on 2026-09-12), and a numeric id plus a display NAME when signed in. The probe scans the inline scripts for that record, gates on USER_ID != \"0\", and reports NAME. The readable ds_user_id cookie is used only as corroboration in `why`, and the one case where they disagree (USER_ID \"0\" but ds_user_id present, i.e. a cached or logged-out shell served to a live session) is reported as signed_in with an explicit warning to re-probe rather than as a silent verdict either way. document.cookie is wrapped because it throws SecurityError on an opaque origin. WHAT A READ RECIPE SHOULD DO: the DOM is a last resort; the real path is the same GraphQL endpoint the page uses. Capture a real feed/profile request first (recipe-builder), then replay POST https://www.threads.com/api/graphql with the page's fb_dtsg, LSD token, X-IG-App-ID and the doc_id for the query, reading posts out of the JSON. doc_ids rotate without warning, so a recipe must fail loudly on a missing doc_id instead of returning an empty list. A cheap read-only fallback for a single profile is the server-rendered https://www.threads.com/@<handle> document, whose data-sjs blobs contain the posts before any hydration. WRITE: empty. Posting goes through the same GraphQL surface and is not documented anywhere stable enough to write down as a verb.",
+  "probe_checked": "2026-09-12: ran live in the fork and returned a clean signed_out verdict (no throw, no 'no verdict'). The signed-OUT path is proven; the signed-IN path is still a hypothesis."
+}

@@ -1,0 +1,45 @@
+{
+  "domain": "reddit.com",
+  "aliases": [
+    "reddit",
+    "subreddit",
+    "r/"
+  ],
+  "home": "https://www.reddit.com/",
+  "login": {
+    "url": "https://www.reddit.com/login/",
+    "note": "Manual, by a human, in this profile — always (ADR-0008). Username/password, or Google/Apple SSO in a popup. 2FA is opt-in per account, so it may or may not appear. `chrome-agent login reddit.com` opens the page and types nothing.",
+    "twofa": false
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://www.reddit.com/logout/",
+    "note": "UNVERIFIED — not driven from this fork. Shreddit exposes /logout/ and the account menu's 'Log Out'; old.reddit.com instead needs a POST to /logout with the per-page `uh` modhash, so a GET there does nothing. If the route no longer ends the session, clear the profile's reddit.com cookies."
+  },
+  "auth": {
+    "probe_url": "https://www.reddit.com/",
+    "probe_js": "// TRAP: /api/v1/me.json answers HTTP 200 when signed OUT — with a body of {\"features\":{...}} and\n// no name. The status code is not the verdict here; the presence of `name` is. (Seen 2026-09-12.)\ntry {\n  const r = await fetch('/api/v1/me.json', {credentials:'include', headers:{accept:'application/json'}});\n  if (r.status === 401 || r.status === 403) return {signed_in:false, why:'me.json '+r.status};\n  const j = await r.json();\n  return j && j.name ? {signed_in:true, as:j.name} : {signed_in:false, why:'me.json has no name'};\n} catch (e) { return {signed_in:false, why:'me.json failed: '+e.message}; }"
+  },
+  "read": {
+    "verb": "reddit:listing",
+    "fixture_url": "https://www.reddit.com/"
+  },
+  "write": [
+    "reddit:post",
+    "reddit:submit",
+    "reddit:post-oauth",
+    "reddit:comment",
+    "reddit:delete-post",
+    "reddit:upvote"
+  ],
+  "traps": [
+    "One shared browser, no mutex. Two lanes attach to a nondeterministic tab. Run `chrome-agent goto <url>` then `chrome-agent status` before believing any read.",
+    "The .json listing API answers HTTP 200 when signed OUT, with a body of {\"features\":{...}} and no `name` — the status code is not the verdict, the presence of a field is. (promoted 2026-09-12, from note)",
+    "A listing ROOT needs `/.json`, not `.json`: stripping the trailing slash off https://www.reddit.com leaves the bare origin, so appending .json builds the HOST www.reddit.com.json and fetch rejects with `TypeError: Failed to fetch` — a DNS failure that never mentions the URL. (promoted 2026-09-12, from note)",
+    "/api/submit is captcha-gated; reddit:submit drives the /submit page UI (shadow-DOM aware) to sidestep that, and needs r/<sub>/submit/?type=TEXT open first.",
+    "Verification rule: read the artifact back from the live page. A 2xx proves nothing here, and on some of these sites neither does a 5xx."
+  ],
+  "status": "verified",
+  "source": "hand",
+  "notes": "Converted from the CLI's `_auth_probe_js` case branch and playbooks/reddit.com/. Read verified 2026-09-12 via recipe:reddit:listing. reddit:comment acts on the page the caller chose, so `_ensure_origin` deliberately does not navigate for it. Writes staged unless opts.confirm=true."
+}

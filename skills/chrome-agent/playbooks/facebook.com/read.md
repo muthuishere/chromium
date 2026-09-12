@@ -2,6 +2,7 @@
 verbs:
   feed: chrome-agent recipe facebook:feed
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://www.facebook.com/
 ---
 
 # facebook.com — read

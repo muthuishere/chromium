@@ -1,0 +1,51 @@
+{
+  "domain": "linkedin.com",
+  "aliases": [
+    "linkedin",
+    "li",
+    "company page",
+    "personal profile"
+  ],
+  "home": "https://www.linkedin.com/",
+  "login": {
+    "url": "https://www.linkedin.com/login",
+    "note": "Manual, by a human, in this profile — always (ADR-0008). `chrome-agent login linkedin.com` opens the page and types nothing. Email/password plus, on a new device, an emailed or app code; LinkedIn also sometimes shows a puzzle challenge. Logged out does NOT look like an error: the site redirects to /login/?session_redirect=... and renders a perfectly normal page.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://www.linkedin.com/m/logout/",
+    "note": "UNVERIFIED — not driven from this fork. The mobile-web /m/logout/ route has historically ended the session on a GET; the desktop UI instead POSTs to /uas/logout with the JSESSIONID csrf token behind the Me menu. If the GET route no longer works, fall back to clearing the profile's linkedin.com cookies."
+  },
+  "auth": {
+    "probe_url": "https://www.linkedin.com/",
+    "probe_js": "// li_at is HttpOnly — document.cookie CANNOT see it, so gating on it reports every live session\n// as logged out (proven 2026-09-12 on a valid session). Ask the API instead: the browser attaches\n// the HttpOnly cookie itself, and 401/403 is the site's own verdict.\n// FAILS CLOSED. An earlier cut returned signed_in:true from its catch block, so a network blip, a\n// CSP refusal or a stale JSESSIONID on a logged-out page all reported green — on the one site\n// where a false green already cost 44 hours of silent non-posting. JSESSIONID is the CSRF cookie\n// and is set for anonymous visitors too: its ABSENCE is evidence, its presence is not.\nconst c = (() => { try { return document.cookie; } catch (e) { return ''; } })();\nconst csrf = (c.match(/JSESSIONID=\"?([^\";]+)/) || [])[1] || '';\nif (!csrf) return {signed_in:false, why:'no JSESSIONID — not a logged-in linkedin document'};\ntry {\n  const r = await fetch('/voyager/api/me', {headers:{'csrf-token':csrf, accept:'application/json'}, credentials:'include'});\n  if (r.status === 401 || r.status === 403) return {signed_in:false, why:'voyager/me '+r.status};\n  if (!r.ok) return {signed_in:false, inconclusive:true, why:'voyager/me '+r.status+' — no verdict, treating as signed out'};\n  const j = await r.json();\n  const m = j.miniProfile || {};\n  const as = [m.firstName, m.lastName].filter(Boolean).join(' ') || j.publicIdentifier || m.publicIdentifier;\n  if (!as) return {signed_in:false, inconclusive:true, why:'voyager/me returned no identity'};\n  return {signed_in:true, as};\n} catch (e) {\n  return {signed_in:false, inconclusive:true, why:'voyager/me unreachable: '+e.message};\n}"
+  },
+  "read": {
+    "verb": "linkedin:feed",
+    "fixture_url": "https://www.linkedin.com/"
+  },
+  "write": [
+    "linkedin:post",
+    "linkedin:comment",
+    "linkedin:comment-delete",
+    "linkedin:delete-post",
+    "linkedin:like",
+    "linkedin:post-image"
+  ],
+  "traps": [
+    "Strict CSP kills `evalAsync` — `script-src` without `unsafe-eval`. A plain eval fails silently: no error, no result. Use `evalwithcsp`.",
+    "The comment API returns HTTP 500 while succeeding. The comment IS created. Retrying double-posts. Verify the artifact, never the status code.",
+    "Logged out looks like a page, not an error — it redirects to `/login/?session_redirect=...`.",
+    "One shared browser, no mutex. Two lanes attach to a nondeterministic tab. Run `chrome-agent goto <url>` then `chrome-agent status` before believing any read.",
+    "`li_at` is HttpOnly, so `document.cookie` can never see it — gating a signed-in check on it calls a perfectly live session logged out. Ask `/voyager/api/me` with the JSESSIONID csrf token and let the browser attach the cookie. (promoted 2026-09-12, from note)",
+    "Origin is not enough for the voyager read recipes — they need /feed/ specifically. Proven 2026-07-21: from /in/me/recent-activity (host matches) linkedin:feed TIMED OUT; the same call from /feed/ returned 20 posts. linkedin:my-posts is the mirror image — run from /feed/ it returns postCount:0, which is indistinguishable from 'we have no posts'.",
+    "linkedin:post-image is KNOWN BROKEN (2026-07-10): register + upload succeed and normShares returns 201, but the published post renders text-only. Check the live post for the image before calling it done.",
+    "Verification rule: read the artifact back from the live page. A 2xx proves nothing here, and on some of these sites neither does a 5xx.",
+    "The signed-in probe must FAIL CLOSED. A `catch` that returns signed_in:true turns a network blip into a green light on the one site where a false green already cost 44 hours of silent non-posting.",
+    "JSESSIONID is the CSRF cookie, not a session: it is set for anonymous visitors too. Its absence is evidence; its presence is not. Only /voyager/api/me decides."
+  ],
+  "status": "verified",
+  "source": "hand",
+  "notes": "Converted from the CLI's `_auth_probe_js` case branch and the generated playbook (playbooks/linkedin.com/). Probe verified live 2026-09-12 (returned a real display name); read verified 2026-09-12 via recipe:linkedin:feed. Every write is staged unless opts.confirm=true — do not route around that."
+}

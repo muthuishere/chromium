@@ -429,6 +429,12 @@ _clear_stale_singleton(){
   echo "stale SingletonLock cleared (${tgt:-unknown}, no live pid) — a previous browser was killed" >&2
 }
 up(){ local url="${1:-https://www.linkedin.com/feed/}"
+  # --headless is how a SERVER runs (ADR 0003): no window, no Mach bootstrap to fail, and the same
+  # spool/tabId/eval/screenshot protocol. Login cannot happen here — see `login`, which refuses
+  # rather than opening a window nobody can see.
+  case "$url" in --headless) CHROMIUM_AGENT_HEADLESS=1; url="${2:-https://www.linkedin.com/feed/}" ;; esac
+  [ "${CHROME_AGENT_HEADLESS:-}" = "1" ] && CHROMIUM_AGENT_HEADLESS=1
+  export CHROMIUM_AGENT_HEADLESS="${CHROMIUM_AGENT_HEADLESS:-}"
   _require_fork; _require_binary
   _sweep_spool
   # CHROMIUM_SENDKEYS_DIR must be passed too: the browser watches the spool it is
@@ -524,6 +530,18 @@ watch(){ local url="$1"
   ( cd "$SKILL/../video-transcribe" && GEMINI_API_KEY="$(zsh -ic 'echo $GEMINI_API_KEY' 2>/dev/null)" python3 scripts/transcribe.py "$mp3" 2>&1 | tail -2 )
   echo "TRANSCRIPT: $(ls -t "$HOME/.config/video-transcribe"/*/transcript.md 2>/dev/null | head -1)"; }
 
+# ---- SITE DEFINITIONS (ADR 0004) -------------------------------------------------------------
+# Page-level truth — login url, the signed-in probe, the logout route, which verb reads the site —
+# lives in sites/<domain>.json, resolved by scripts/sites.py with the INSTALLED copy
+# (~/.config/chrome-agent/sites) winning over the shipped one. That is what lets a re-skinned site
+# be fixed on a server with one JSON edit and no redeploy.
+#
+# The bash `case` fallbacks below stay for any domain that has no file yet: a missing asset must
+# degrade to the behaviour we already proved, never to "unknown site".
+SITES_PY="$SKILL/scripts/sites.py"
+_site(){ python3 "$SITES_PY" field "$1" "$2" 2>/dev/null; }
+_site_has(){ python3 "$SITES_PY" path "$1" >/dev/null 2>&1; }
+
 # ---- IDENTITY: profile · login · auth (2026-09-12) -------------------------------------------
 # apl (ADR-0007) treats `login` as a capability — "prepare the child process that ESTABLISHES the
 # credential" — and its table had one blank row: browser:<label>, because this CLI had no sign-in
@@ -543,31 +561,50 @@ _domain_norm(){ local d="${1:-}"
 # The per-site probe. READ-ONLY: it asks the page/site who it thinks we are and returns
 # {signed_in, as?}. Each one is cookie-or-API, never a DOM guess at a login button, because a
 # logged-out LinkedIn renders a perfectly valid-looking page at /feed/.
-_auth_probe_js(){ case "$1" in
+_auth_probe_js(){
+  # The site file is the source of truth when it exists; the case below is the fallback for a
+  # domain nobody has written a file for yet.
+  local fromfile; fromfile="$(_site "$1" auth.probe_js)"
+  if [ -n "$fromfile" ]; then printf '%s\n' "$fromfile"; return 0; fi
+  case "$1" in
   linkedin.com) cat <<'JS'
 // li_at is HttpOnly — document.cookie CANNOT see it, so gating on it reports every live session
-// as logged out (proven here 2026-09-12 on a perfectly valid session). Ask the API instead: the
-// browser attaches the HttpOnly cookie itself, and 401/403 is the site's own verdict.
+// as logged out (proven 2026-09-12 on a valid session). Ask the API instead: the browser attaches
+// the HttpOnly cookie itself, and 401/403 is the site's own verdict.
+// FAILS CLOSED. An earlier cut returned signed_in:true from its catch block, so a network blip, a
+// CSP refusal or a stale JSESSIONID on a logged-out page all reported green — on the one site
+// where a false green already cost 44 hours of silent non-posting. JSESSIONID is the CSRF cookie
+// and is set for anonymous visitors too: its ABSENCE is evidence, its presence is not.
 const c = (() => { try { return document.cookie; } catch (e) { return ''; } })();
 const csrf = (c.match(/JSESSIONID="?([^";]+)/) || [])[1] || '';
 if (!csrf) return {signed_in:false, why:'no JSESSIONID — not a logged-in linkedin document'};
 try {
   const r = await fetch('/voyager/api/me', {headers:{'csrf-token':csrf, accept:'application/json'}, credentials:'include'});
   if (r.status === 401 || r.status === 403) return {signed_in:false, why:'voyager/me '+r.status};
+  if (!r.ok) return {signed_in:false, inconclusive:true, why:'voyager/me '+r.status+' — no verdict, treating as signed out'};
   const j = await r.json();
   const m = j.miniProfile || {};
   const as = [m.firstName, m.lastName].filter(Boolean).join(' ') || j.publicIdentifier || m.publicIdentifier;
-  return {signed_in:true, as: as || undefined};
-} catch (e) { return {signed_in:true, why:'li_at present; identity probe failed: '+e.message}; }
+  if (!as) return {signed_in:false, inconclusive:true, why:'voyager/me returned no identity'};
+  return {signed_in:true, as};
+} catch (e) {
+  return {signed_in:false, inconclusive:true, why:'voyager/me unreachable: '+e.message};
+}
 JS
 ;;
   x.com|twitter.com) cat <<'JS'
-// auth_token is HttpOnly; ct0 (the CSRF cookie) is not, and only a signed-in session has one.
-// The profile link is the corroborating evidence and the only source of the handle.
+// auth_token is HttpOnly; ct0 (the CSRF cookie) is not. But ct0 alone is WEAK — it is set during
+// the login flow, before authentication completes — so it is necessary, not sufficient. The
+// profile link is the corroborating evidence and the only source of the handle, and on a cold tab
+// it can paint late, so wait for it briefly before deciding rather than calling a live session
+// logged out because the SPA had not rendered.
 const c = (() => { try { return document.cookie; } catch (e) { return ''; } })();
-const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+const link = () => document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+let a = link();
+for (let i = 0; i < 10 && !a; i++) { await new Promise(r => setTimeout(r, 300)); a = link(); }
 const as = a ? a.getAttribute('href').replace(/^\//,'') : undefined;
 if (!/\bct0=/.test(c) && !a) return {signed_in:false, why:'no ct0 cookie and no profile link'};
+if (!a) return {signed_in:false, inconclusive:true, why:'ct0 present but no profile link after 3s — a half-completed login flow looks exactly like this'};
 return {signed_in:true, as};
 JS
 ;;
@@ -625,7 +662,13 @@ JS
   *) return 1 ;;
 esac; }
 
-_auth_domains(){ printf 'linkedin.com x.com reddit.com news.ycombinator.com github.com youtube.com facebook.com instagram.com\n'; }
+_auth_domains(){
+  # Whatever has a site file, plus the built-in fallbacks, deduped.
+  { python3 "$SITES_PY" list --json 2>/dev/null | python3 -c 'import json,sys
+try: print(" ".join(r["domain"] for r in json.load(sys.stdin)))
+except Exception: pass' 2>/dev/null
+    printf 'linkedin.com x.com reddit.com news.ycombinator.com github.com youtube.com facebook.com instagram.com'
+  } | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//'; echo; }
 
 # auth <domain> -> {domain, profile, signed_in, as?}  ·  exit 0 signed in, 2 not, 3 no browser.
 # It navigates THIS SESSION'S OWN TAB to the domain, because a cookie is origin-scoped and a
@@ -635,7 +678,11 @@ auth(){ local domain; domain="$(_domain_norm "${1:-}")"
   [ -n "$domain" ] || die "$EX_USAGE" "usage" "auth <domain> — e.g. chrome-agent auth linkedin.com. Probed domains: $(_auth_domains)"
   local js; js="$(_auth_probe_js "$domain")" || die "$EX_USAGE" "no-probe" "no auth probe for $domain — a guess here would report a green light nobody verified. Probed domains: $(_auth_domains)"
   cj eval "1" >/dev/null 2>&1 || die "$EX_BROWSER" "browser-down" "no browser is servicing $SPOOL — run: chrome-agent up"
-  goto "https://$domain/" 5
+  # A cookie is origin-scoped and half these probes ask the site's own API, so the page matters:
+  # auth.probe_url, else home, else the bare root.
+  local url; url="$(_site "$domain" auth.probe_url)"; [ -n "$url" ] || url="$(_site "$domain" home)"
+  [ -n "$url" ] || url="https://$domain/"
+  goto "$url" 5
   local res; res=$(evalwithcsp "$js" 15)
   python3 -c 'import json,sys
 raw=sys.stdin.read().strip()
@@ -646,10 +693,15 @@ if not isinstance(v,dict) or "signed_in" not in v:
                       "error":"probe returned no verdict","detail":raw[:200]},separators=(",",":")))
     sys.exit(3)
 out={"domain":sys.argv[1],"profile":sys.argv[2],"signed_in":bool(v.get("signed_in"))}
-for k in ("as","why"):
+for k in ("as","why","inconclusive"):
     if v.get(k): out[k]=v[k]
+# An UNVERIFIED definition is a hypothesis written from documentation. Saying so in the same
+# breath as the verdict is what keeps a guess from reading like proof.
+if len(sys.argv)>3 and sys.argv[3]=="unverified":
+    out["definition"]="unverified"
+    out["note"]="this site definition has never been proven live — treat the verdict as provisional"
 print(json.dumps(out,separators=(",",":")))
-sys.exit(0 if out["signed_in"] else 2)' "$domain" "$PROFILE" <<<"$res"
+sys.exit(0 if out["signed_in"] else 2)' "$domain" "$PROFILE" "$(_site "$domain" status)" <<<"$res"
 }
 
 # login <domain> — open the window at that site and GET OUT OF THE WAY.
@@ -660,11 +712,27 @@ sys.exit(0 if out["signed_in"] else 2)' "$domain" "$PROFILE" <<<"$res"
 login(){ local domain; domain="$(_domain_norm "${1:-}")"
   [ -n "$domain" ] || die "$EX_USAGE" "usage" "login <domain> — e.g. chrome-agent login linkedin.com"
   _require_fork; _require_binary
-  if ! cj eval "1" >/dev/null 2>&1; then up "https://$domain/" >/dev/null; else cjt goto "https://$domain/" >/dev/null 2>&1; fi
+  local url note twofa
+  url="$(_site "$domain" login.url)"; [ -n "$url" ] || url="https://$domain/"
+  note="$(_site "$domain" login.note)"; twofa="$(_site "$domain" login.twofa)"
+  # HEADLESS CANNOT BE SIGNED IN BY A HUMAN. On a server the window lives on a virtual display and
+  # is reached through `chrome-agent share` (ADR 0003); say that instead of opening a window nobody
+  # can see and then waiting for a login that can never happen.
+  if [ "${CHROMIUM_AGENT_HEADLESS:-}" = "1" ] || [ "${CHROME_AGENT_HEADLESS:-}" = "1" ]; then
+    python3 -c 'import json,sys;print(json.dumps({"status":"needs-a-screen","domain":sys.argv[1],"profile":sys.argv[2],
+      "why":"this profile is running headless, and a human cannot sign in to a window that is not drawn",
+      "do":"on a server: chrome-agent share start  (then open the URL, sign in, chrome-agent share stop)",
+      "then":"chrome-agent auth "+sys.argv[1]},separators=(",",":")))' "$domain" "$PROFILE"
+    return 0
+  fi
+  if ! cj eval "1" >/dev/null 2>&1; then up "$url" >/dev/null; else cjt goto "$url" >/dev/null 2>&1; fi
   sleep 3
   python3 -c 'import json,sys;print(json.dumps({"status":"awaiting-human","domain":sys.argv[1],"profile":sys.argv[2],
+    "opened":sys.argv[3],
+    "expect":sys.argv[4] or None,
+    "twofa":(sys.argv[5]=="true") if sys.argv[5] else None,
     "note":"the browser window is open at this site in this profile. Sign in BY HAND — this command types nothing and never will.",
-    "then":"chrome-agent auth "+sys.argv[1]},separators=(",",":")))' "$domain" "$PROFILE"
+    "then":"chrome-agent auth "+sys.argv[1]},separators=(",",":")))' "$domain" "$PROFILE" "$url" "$note" "$twofa"
 }
 
 # profile create <dir> — make a profile, do NOT launch.
@@ -770,6 +838,169 @@ return {site:'hackernews',recipe:'top',url:location.href,capturedAt:new Date().t
   echo "$res"; log "hackernews:top" "front-page" "$res"
 }
 
+# ---- logout <domain> (ADR 0005) --------------------------------------------------------------
+# We could acquire an identity and could not put one down. On a shared or server machine that is
+# backwards: the risky state is a session left lying around, and that was the one with no command.
+#
+# DOMAIN-SCOPED like login/auth: ending one site must not touch the others in the profile.
+# Method comes from the site definition, and the three are NOT equivalent — the output says which
+# one ran, because "we cleared cookies locally" and "the site ended your session" are different
+# facts and only one of them revokes anything server-side.
+logout(){ local domain; domain="$(_domain_norm "${1:-}")"
+  [ -n "$domain" ] || die "$EX_USAGE" "usage" "logout <domain> — e.g. chrome-agent logout linkedin.com"
+  cj eval "1" >/dev/null 2>&1 || die "$EX_BROWSER" "browser-down" "no browser is servicing $SPOOL — run: chrome-agent up"
+  local method url selector note home
+  method="$(_site "$domain" logout.method)"; url="$(_site "$domain" logout.url)"
+  selector="$(_site "$domain" logout.selector)"; note="$(_site "$domain" logout.note)"
+  home="$(_site "$domain" home)"; [ -n "$home" ] || home="https://$domain/"
+  [ -n "$method" ] || method="cookies"
+  local did=""
+  case "$method" in
+    url)
+      [ -n "$url" ] || die "$EX_USAGE" "bad-definition" "logout.method=url but the site file has no logout.url for $domain"
+      goto "$url" 6; did="navigated the site's own logout route" ;;
+    dom)
+      [ -n "$selector" ] || die "$EX_USAGE" "bad-definition" "logout.method=dom but the site file has no logout.selector for $domain"
+      goto "$home" 5
+      # Clicking the site's OWN control is the only write this CLI performs without --confirm, and
+      # it is safe in exactly one direction: it can only end a session, never start or publish one.
+      evalwithcsp "const b=document.querySelector($(printf '%s' "$selector" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')); if(!b) return 'no-control'; b.click(); return 'clicked';" 10 >/dev/null
+      sleep 4; did="clicked the site's own logout control" ;;
+    cookies)
+      # LAST RESORT, and the output must never let it pass for a real logout: this ends the LOCAL
+      # session only. The server-side session stays alive until it expires on its own.
+      goto "$home" 4
+      evalwithcsp '
+const names = (() => { try { return document.cookie.split(";").map(c => c.trim().split("=")[0]).filter(Boolean); } catch (e) { return []; } })();
+const host = location.hostname.replace(/^www\./, "");
+const paths = ["/", location.pathname];
+const domains = ["", host, "." + host, "." + host.split(".").slice(-2).join(".")];
+for (const n of names) for (const p of paths) for (const d of domains) {
+  document.cookie = n + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=" + p + (d ? "; domain=" + d : "");
+}
+try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}
+return {cleared: names.length};' 12 >/dev/null
+      sleep 2; did="cleared this origin's readable cookies and web storage — the SERVER-side session may still be live" ;;
+    *) die "$EX_USAGE" "bad-definition" "logout.method must be url|dom|cookies (got '$method')" ;;
+  esac
+  # VERIFY. Every other verb here proves its effect; a logout that says "done" without checking is
+  # the same lie as a 200 on a dead post.
+  local after rc; after="$($CA_SELF auth "$domain" 2>/dev/null)"; rc=$?
+  log "logout:$domain" "$domain" "$method/$did rc=$rc"
+  python3 -c 'import json,sys
+rc=int(sys.argv[4]); after=sys.argv[5]
+try: a=json.loads(after)
+except Exception: a={}
+out={"domain":sys.argv[1],"profile":sys.argv[2],"method":sys.argv[3],"did":sys.argv[6],
+     "signed_out":rc==2,"auth_after":a}
+if sys.argv[7]: out["note"]=sys.argv[7]
+if sys.argv[3]=="cookies":
+    out["warning"]="local only — the site was never told, so its session persists until it expires"
+print(json.dumps(out,separators=(",",":")))
+# Idempotent by intent: "be signed out" is satisfied whether or not we had to do anything.
+sys.exit(0 if rc==2 else 4)' "$domain" "$PROFILE" "$method" "$rc" "$after" "$did" "$note"
+}
+
+# ---- profile lifecycle (ADR 0005) ------------------------------------------------------------
+# On a server nobody can see these directories, and a profile whose spool is not what you expect is
+# the bug class that already cost two incidents (a trailing slash forked one profile into two
+# spools; a basename collision merged two profiles into one). So: list them, with their spools.
+profile_list(){
+  local dirs=""; for d in "$HOME"/chrome-agent-profile* "$HOME"/.config/chrome-agent/profiles/*; do
+    [ -d "$d" ] && case "$d" in *'*'*) ;; *) dirs="$dirs $d";; esac
+  done
+  [ -n "${CHROME_AGENT_PROFILE:-}" ] && [ -d "${CHROME_AGENT_PROFILE%/}" ] && dirs="$dirs ${CHROME_AGENT_PROFILE%/}"
+  # SingletonLock is a SYMLINK to "<host>-<pid>", a target that never exists as a file — so `-e`
+  # (which follows the link) reports "free" while a browser is running. Test the link itself, then
+  # ask whether the pid is alive: a lock with no live owner is the stale one that makes the next
+  # `up` a silent no-op.
+  { for d in $dirs; do
+      local lk="free" tgt pid
+      if [ -L "$d/SingletonLock" ]; then
+        tgt="$(readlink "$d/SingletonLock" 2>/dev/null || true)"; pid="${tgt##*-}"
+        case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then lk="running:$pid"; else lk="STALE-LOCK"; fi
+      fi
+      printf '%s\t%s\t%s\t%s\n' "$d" "$(_spool_for "$d")" \
+        "$(du -sh "$d" 2>/dev/null | cut -f1)" "$lk"; done; } \
+  | sort -u | python3 -c 'import sys,json
+rows=[]
+for l in sys.stdin:
+    p=l.rstrip("\n").split("\t")
+    if len(p)==4 and p[0]:
+        rows.append({"profile":p[0],"spool":p[1],"size":p[2],"lock":p[3]})
+print(json.dumps({"count":len(rows),"profiles":rows},indent=2))'
+}
+profile_delete(){ local dir="${1:-}" yes="${2:-}"
+  [ -n "$dir" ] || die "$EX_USAGE" "usage" "profile delete <dir> [--yes]"
+  dir="${dir%/}"
+  [ -d "$dir" ] || die "$EX_USAGE" "no-such-profile" "no profile at $dir"
+  # Deleting a profile is the ONLY way we can revoke a browser identity, so it must read like a
+  # revocation and not like rm: refuse while it is live, refuse the default by accident, and say
+  # what is inside before asking.
+  local spool; spool="$(_spool_for "$dir")"
+  # `-L`, not `-e`: the lock is a symlink whose target never exists, so `-e` is always false and the
+  # "is it running?" guard never fired.
+  if [ -L "$dir/SingletonLock" ] || [ -e "$dir/SingletonLock" ]; then
+    local tgt pid; tgt="$(readlink "$dir/SingletonLock" 2>/dev/null || true)"; pid="${tgt##*-}"
+    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      die "$EX_USAGE" "profile-in-use" "a browser (pid $pid) is running on $dir — close it first; deleting a live profile loses every session in it"
+    fi
+  fi
+  if [ "$dir" = "$HOME/chrome-agent-profile" ] && [ "$yes" != "--force" ]; then
+    die "$EX_USAGE" "default-profile" "$dir is the DEFAULT profile — every existing script and session uses it. Pass --force if you really mean it."
+  fi
+  if [ "$yes" != "--yes" ] && [ "$yes" != "--force" ]; then
+    python3 -c 'import json,sys;print(json.dumps({"about_to_delete":sys.argv[1],"spool":sys.argv[2],
+      "size":sys.argv[3],"staged":True,
+      "warning":"this destroys every site session in this profile — it is a revocation, not a cleanup",
+      "note":"pass --yes to actually delete"},separators=(",",":")))' \
+      "$dir" "$spool" "$(du -sh "$dir" 2>/dev/null | cut -f1)"
+    return 0
+  fi
+  rm -rf "$dir" && rm -rf "$spool"
+  log "profile:delete" "$dir" "deleted with spool $spool"
+  python3 -c 'import json,sys;print(json.dumps({"deleted":sys.argv[1],"spool_removed":sys.argv[2]},separators=(",",":")))' "$dir" "$spool"
+}
+
+# ---- doctor (ADR 0006) -----------------------------------------------------------------------
+# A CLI newer than its engine discovers that as a command that hangs forever, which is the worst
+# error a system can give. doctor asks every question whose wrong answer produces a hang.
+doctor(){
+  local bin; bin="$(_fork_binary)"
+  python3 -c 'import json,os,shutil,subprocess,sys
+fork,cjs,launch,binary,spool,profile,sites=sys.argv[1:8]
+def ok(p): return os.path.exists(p)
+res={
+ "fork":{"path":fork,"present":os.path.isdir(fork),"cli":ok(cjs),"launcher":ok(launch),
+         "binary":binary,"built":os.access(binary,os.X_OK)},
+ "profile":{"path":profile,"exists":os.path.isdir(profile),
+            "locked":os.path.lexists(os.path.join(profile,"SingletonLock"))},
+ "spool":{"path":spool,"exists":os.path.isdir(spool)},
+ "tools":{t:bool(shutil.which(t)) for t in ("node","python3","cloudflared","Xvfb","x11vnc")},
+ "sites":{"dir":sites},
+}
+missing=[]
+if not res["fork"]["cli"] or not res["fork"]["launcher"]: missing.append("fork (set CHROME_AGENT_FORK)")
+if not res["fork"]["built"]: missing.append("built binary (autoninja -C out/Default chrome)")
+for t in ("node","python3"):
+    if not res["tools"][t]: missing.append(t)
+res["ready"]=not missing
+res["missing"]=missing
+if not res["tools"]["cloudflared"]:
+    res.setdefault("notes",[]).append("cloudflared absent — `share` (remote login, ADR 0003) will not work")
+if not res["tools"]["Xvfb"]:
+    res.setdefault("notes",[]).append("Xvfb absent — headful login on a server needs it (macOS desktops do not)")
+print(json.dumps(res,indent=2))
+sys.exit(0 if res["ready"] else 3)' "$FORK" "$CJS" "$LAUNCH" "$bin" "$SPOOL" "$PROFILE" "$HOME/.config/chrome-agent/sites"
+}
+
+# ---- share: the time-boxed login window (ADR 0003) -------------------------------------------
+share(){ local sh="$SKILL/scripts/share.sh"
+  [ -x "$sh" ] || [ -f "$sh" ] || die "$EX_USAGE" "not-installed" "scripts/share.sh is not present in this install"
+  bash "$sh" "$@"; }
+
 # ---- verify <domain> — make `last_verified` mean something (2026-09-12) ----------------------
 # The playbooks' `last_verified` was stamped at GENERATION time, which proves only that someone ran
 # a generator. It said nothing about whether the site still answers, so a playbook could age into
@@ -790,8 +1021,17 @@ esac; }
 
 # _verify_plan <domain> -> "key<TAB>cli<TAB>url"; cli is empty for a registry recipe.
 _verify_plan(){ local domain="$1" fx key url
-  fx="$(_verify_fixture "$domain")"; key="${fx%%|*}"; url="${fx#*|}"
-  [ -n "$fx" ] || { key=""; url="https://$domain/"; }
+  # The site definition owns this now (ADR 0004); the bash table is the fallback for a domain with
+  # no file. "eval" means the site has no read recipe yet — there is nothing to run, so verify
+  # falls through to the auth probe, which is the honest answer for those sites.
+  key="$(_site "$domain" read.verb)"; url="$(_site "$domain" read.fixture_url)"
+  [ "$key" = "eval" ] && key=""
+  if [ -z "$key" ] && [ -z "$url" ]; then
+    fx="$(_verify_fixture "$domain")"; key="${fx%%|*}"; url="${fx#*|}"
+    [ -n "$fx" ] || { key=""; url="https://$domain/"; }
+  fi
+  [ -n "$url" ] || url="$(_site "$domain" home)"
+  [ -n "$url" ] || url="https://$domain/"
   node "$SKILL/recipes-list.mjs" --json 2>/dev/null | python3 -c 'import json,sys
 DOMAIN={"linkedin":"linkedin.com","x":"x.com","facebook":"facebook.com","instagram":"instagram.com",
         "reddit":"reddit.com","youtube":"youtube.com","hackernews":"news.ycombinator.com"}
@@ -872,7 +1112,7 @@ usage(){ cat <<'EOF'
 chrome-agent — social READ+WRITE (LinkedIn/X/YouTube/…) over the undetectable chromium fork.
 It RUNS browser-research's verified recipes through the fork — no per-site reinvention.
 
-  up [url] | status | goto <url> | shot [path]
+  up [--headless] [url] | status | goto <url> | shot [path]
   recipes [--json]                every runnable verb (registry + chrome-agent's own), --json for tools
   recipe <site:name> [opts-json]  run ANY recipe through the fork (general, all sites)
   evalAsync '<async-js>'          run any promise-returning JS and get the result
@@ -894,7 +1134,11 @@ It RUNS browser-research's verified recipes through the fork — no per-site rei
   verify <domain>                 run the site's real read recipe; stamp playbook last_verified
   note <domain> "<learned>"       capture site knowledge the moment you learn it
   promote [<domain>] [--apply] [--notes-only]   review what is known but not in the playbook
-  profile create <dir>            make a profile, do not launch
+  logout <domain>                 end THIS site's session; verifies with auth afterwards
+  profile create <dir> | list | delete <dir> [--yes]
+  sites list | show <domain> | path <domain> | validate | sync [--force]
+  doctor                          is this machine able to run anything at all?
+  share start|status|stop         time-boxed remote login window on a server (ADR 0003)
   profile | spool                 which profile/spool this invocation resolves to
   exit-codes [--json]             0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused
 
@@ -915,10 +1159,24 @@ esac
 
 case "${1:-}" in
   spool) echo "$SPOOL";;
-  profile) case "${2:-}" in create) profile_create "${3:-}";; ''|show) echo "$PROFILE";; *) die "$EX_USAGE" "usage" "profile [create <dir>]";; esac;;
-  auth) auth "${2:-}";; login) login "${2:-}";; verify) verify "${2:-}";;
+  profile) case "${2:-}" in
+      create) profile_create "${3:-}";;
+      list) profile_list;;
+      delete|rm) profile_delete "${3:-}" "${4:-}";;
+      ''|show) echo "$PROFILE";;
+      *) die "$EX_USAGE" "usage" "profile [create <dir> | list | delete <dir> [--yes]]";; esac;;
+  auth) auth "${2:-}";; login) login "${2:-}";; logout) logout "${2:-}";; verify) verify "${2:-}";;
+  doctor) doctor;;
+  share) shift; share "$@";;
+  sites) shift; case "${1:-list}" in
+      list) python3 "$SITES_PY" list "${2:-}";;
+      show|resolve) python3 "$SITES_PY" resolve "${2:-}";;
+      path) python3 "$SITES_PY" path "${2:-}";;
+      validate) shift; python3 "$SITES_PY" validate "$@";;
+      sync) shift; python3 "$SITES_PY" sync "$@";;
+      *) die "$EX_USAGE" "usage" "sites list|show <domain>|path <domain>|validate|sync [--force]";; esac;;
   exit-codes|exitcodes) exit_codes "${2:-}";;
-  up) up "${2:-}";; status) status;; goto) goto "${2:-}";; shot) shot "${2:-}";;
+  up) shift; up "${1:-}" "${2:-}";; status) status;; goto) goto "${2:-}";; shot) shot "${2:-}";;
   recipes) recipes "${2:-}";; recipe) recipe "${2:-}" "${3:-}" "${4:-}";; evalasync|evalAsync) evalAsync "${2:-}" "${3:-20}";;
   evalwithcsp) evalwithcsp "${2:-}" "${3:-20}";; evalwithoutcsp) evalwithoutcsp "${2:-}" "${3:-20}";;
   do) do_verify "${2:-}" "${3:-}" "${4:-}";;

@@ -1,0 +1,43 @@
+{
+  "domain": "news.ycombinator.com",
+  "aliases": [
+    "hacker news",
+    "hackernews",
+    "hn",
+    "ycombinator"
+  ],
+  "home": "https://news.ycombinator.com/",
+  "login": {
+    "url": "https://news.ycombinator.com/login",
+    "note": "Manual, by a human, in this profile — always (ADR-0008). Plain username/password form, no SSO and no second factor; the session is a single `user` cookie, so it is long-lived but dies outright when it dies.",
+    "twofa": false
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "a[href^=\"logout\"]",
+    "note": "The logout link in the page header carries a per-page hmac (`logout?auth=<hmac>&goto=news`) — the URL is NOT reusable and cannot be typed, so this has to be the DOM control. Same element the auth probe keys on: if it is absent, we are signed out."
+  },
+  "auth": {
+    "probe_url": "https://news.ycombinator.com/",
+    "probe_js": "const me = document.querySelector('#me, a[href^=\"user?id=\"]');\nconst logout = document.querySelector('a[href^=\"logout\"]');\nif (!logout) return {signed_in:false, why:'no logout link in the page top'};\nreturn {signed_in:true, as: me ? me.textContent.trim() : undefined};"
+  },
+  "read": {
+    "verb": "hackernews:top",
+    "fixture_url": "https://news.ycombinator.com/"
+  },
+  "write": [
+    "hackernews:post",
+    "hackernews:comment"
+  ],
+  "traps": [
+    "HN serves HTTP 200 on a dead or flagged post. The status code is not evidence. Open the item and read it back as a logged-out visitor would see it.",
+    "One shared browser, no mutex. Two lanes attach to a nondeterministic tab. Run `chrome-agent goto <url>` then `chrome-agent status` before believing any read.",
+    "A dead or flagged item still answers 200 and renders — the only evidence is the page text: `[flagged]` / `[dead]`. `chrome-agent hackernews item <id>` reports both, which is what the verification rule here always demanded. (promoted 2026-09-12, from note)",
+    "hackernews:post submits a STORY to /newest — it is NOT the verb for commenting. Use hackernews:comment.",
+    "Both write verbs replay a per-page token (fnid for submit, hmac for comment), so the page must be freshly loaded; a stale token 200s and does nothing.",
+    "Verification rule: read the artifact back from the live page. A 2xx proves nothing here, and on some of these sites neither does a 5xx."
+  ],
+  "status": "verified",
+  "source": "hand",
+  "notes": "Converted from the CLI's `_auth_probe_js` case branch, `_verify_fixture` (hackernews:top | https://news.ycombinator.com/) and playbooks/news.ycombinator.com/. Probe verified live 2026-09-12 (returned a real username). hackernews:top and hackernews:item are chrome-agent's own verbs, not registry recipes — run them as `chrome-agent hackernews top|item`, not via `recipe`."
+}

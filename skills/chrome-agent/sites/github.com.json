@@ -1,0 +1,37 @@
+{
+  "domain": "github.com",
+  "aliases": [
+    "gh",
+    "github"
+  ],
+  "home": "https://github.com/",
+  "login": {
+    "url": "https://github.com/login",
+    "note": "Password then a second factor — GitHub has required 2FA for contributors since 2024, so expect a TOTP/passkey/device prompt every fresh profile. SSO orgs add a second, per-org 'Authorize' step AFTER sign-in: the account is live but org-owned repos 404 until that SAML session is granted. A human types everything.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "url": "https://github.com/logout",
+    "selector": "form[action='/logout'] button[type=submit]",
+    "note": "GET /logout only renders a confirmation page; the real sign-out is a POST carrying authenticity_token, so the button must be clicked. Signing out kills every github.com tab in this profile, including any SAML org session."
+  },
+  "auth": {
+    "probe_url": "https://github.com/",
+    "probe_js": "const m = document.querySelector('meta[name=\"user-login\"]');\nconst as = m && m.content ? m.content : '';\nreturn as ? {signed_in:true, as} : {signed_in:false, why:'no user-login meta'};"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://github.com/notifications"
+  },
+  "write": [],
+  "traps": [
+    "The session cookie (user_session) is HttpOnly — document.cookie cannot see it. Reading cookies here reports a live session as logged out. The meta tag is the evidence.",
+    "api.github.com does NOT accept the browser session cookie: a credentialed fetch from the page to the API host answers 401 even while github.com itself is signed in. In-page reads must go to github.com paths (HTML, or /_graphql with the page's CSRF token); token-auth API work belongs to `gh`, not to this browser.",
+    "Signed-out pages still render a full-looking header, and many repo pages look identical signed in or out. Only meta[name=user-login] distinguishes them.",
+    "Under SAML SSO the account can be signed in and still 404 on org repos until the org session is authorised — that is not a logged-out state and the probe will (correctly) say signed_in:true."
+  ],
+  "status": "verified",
+  "source": "agent-research",
+  "notes": "Probe strategy (a): the site's own embedded config. GitHub server-renders <meta name=\"user-login\" content=\"...\"> on every page for a signed-in session and omits it entirely when signed out, so one synchronous DOM read is both the verdict and the identity — no fetch, no cookie, nothing to time out. This is the probe already shipped in the chrome-agent CLI's _auth_probe_js and it was run live against the browser on 2026-09-12, returning a real login; hence status verified. A READ recipe should not scrape the notifications HTML: prefer github.com/_graphql with the page's csrf token, or the plain HTML of /notifications?query=is:unread (rows are .notifications-list-item with a[data-test-selector=notification-title-link]); the API host is out of reach from the page (see traps)."
+}

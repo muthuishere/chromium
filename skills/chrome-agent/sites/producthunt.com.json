@@ -1,0 +1,36 @@
+{
+  "domain": "producthunt.com",
+  "aliases": [
+    "ph",
+    "producthunt",
+    "product-hunt"
+  ],
+  "home": "https://www.producthunt.com/",
+  "login": {
+    "url": "https://www.producthunt.com/",
+    "note": "There is no password form worth aiming at: the header 'Sign in' opens a provider chooser (Google / X / LinkedIn / email magic-link). Every path leaves the origin, so the operator must stay on the share until the browser lands back on producthunt.com. The email path sends a link — the human clicks it in their mail client, and the session materialises in whichever browser opens that link, which must be THIS one.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "a[href=\"/sign_out\"], a[href*=\"sign_out\"], [data-test=\"logout\"]",
+    "note": "The sign-out control lives INSIDE the avatar menu and is not in the DOM until that menu is opened — a single click on this selector against a closed menu finds nothing and reports success at doing nothing. Open the avatar menu first, then click."
+  },
+  "auth": {
+    "probe_url": "https://www.producthunt.com/",
+    "probe_js": "// The session cookie (_producthunt_session / a __Secure-* next-auth token) is HttpOnly, so\n// document.cookie CANNOT see it — gating on it would report a live session as logged out.\n// Order of evidence: (a) the page's own embedded state, (b) a signed-in-only header control.\nlet why;\ntry {\n  const el = document.getElementById('__NEXT_DATA__');\n  if (el && el.textContent) {\n    const root = JSON.parse(el.textContent);\n    const seen = new Set(); const stack = [root];\n    while (stack.length) {\n      const n = stack.pop();\n      if (!n || typeof n !== 'object' || seen.has(n)) continue;\n      seen.add(n);\n      for (const k of Object.keys(n)) {\n        const v = n[k];\n        if ((k === 'viewer' || k === 'currentUser' || k === 'me') && v && typeof v === 'object' && (v.username || v.id)) {\n          return {signed_in: true, as: v.username || v.name || undefined, why: '__NEXT_DATA__.' + k};\n        }\n        if (v && typeof v === 'object') stack.push(v);\n      }\n    }\n    why = '__NEXT_DATA__ present but names no viewer';\n  }\n} catch (e) { why = '__NEXT_DATA__ parse failed: ' + e.message; }\nconst mine = document.querySelector('header a[href^=\"/@\"], [data-test=\"header-user-menu\"], [data-test=\"user-menu\"], header a[href=\"/my/products\"]');\nif (mine) {\n  const href = (mine.getAttribute && mine.getAttribute('href')) || '';\n  return {signed_in: true, as: href.startsWith('/@') ? href.slice(2) : undefined, why: 'signed-in-only header control'};\n}\nconst wall = document.querySelector('a[href*=\"/sign_in\"], a[href*=\"/login\"], [data-test=\"header-signin\"]');\nreturn {signed_in: false, why: why || (wall ? 'sign-in control in the header' : 'no signed-in header control found')};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://www.producthunt.com/"
+  },
+  "write": [],
+  "traps": [
+    "The session cookie is HttpOnly. document.cookie sees nothing on a live session, so any probe that gates on a cookie name reports logged-out while the account is perfectly signed in.",
+    "The signed-out home page renders a full feed of the day's launches. A read that 'got posts back' is NOT evidence of a session — the products load either way; only the header controls differ.",
+    "Upvote and comment state is client-rendered after hydration. Reading the page too early returns a feed with no interaction state at all, which looks like a signed-out page."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "PROBE STRATEGY: (a) the site's own embedded state first — Product Hunt is a Next.js app, so a '__NEXT_DATA__' script tag is the page telling you what it thinks the session is; the probe walks it for a viewer/currentUser/me node carrying a username or id. (b) DOM fallback scoped to the header — a link to /@<handle> or the user-menu testid renders only for a session. Cookies are deliberately never consulted. Both layers are hypotheses until someone runs 'verify' on a live profile: the exact shape of the viewer node and the exact data-test attributes are the parts most likely to have drifted. A READ RECIPE should not scrape the DOM here — Product Hunt serves a GraphQL endpoint the page itself calls (POST /frontend/graphql with the page's own CSRF header), and replaying that is how you get the leaderboard/launch payload as structured data rather than as re-parsed HTML. Until such a recipe exists, read.verb is 'eval' against the home fixture. WRITE is empty on purpose: upvoting and commenting are mutations behind that same CSRF-guarded endpoint and no safe, documented path has been proven here; inventing one would be a green light nobody verified."
+}

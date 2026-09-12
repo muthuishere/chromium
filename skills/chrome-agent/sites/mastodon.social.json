@@ -1,0 +1,40 @@
+{
+  "domain": "mastodon.social",
+  "aliases": [
+    "mastodon",
+    "fedi",
+    "fediverse"
+  ],
+  "home": "https://mastodon.social/",
+  "login": {
+    "url": "https://mastodon.social/auth/sign_in",
+    "note": "Email + password on THIS instance only. A Mastodon account is instance-local: credentials for another instance will not work here, and the operator must know which instance the identity lives on before the window opens. Some instances put an OAuth/SSO provider on this page instead; mastodon.social does not.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "form[action=\"/auth/sign_out\"] button, a[data-method=\"delete\"][href=\"/auth/sign_out\"]",
+    "url": "https://mastodon.social/auth/sign_out",
+    "note": "Sign-out is a DELETE (Rails) on /auth/sign_out with a CSRF token — visiting that URL with GET does not log anyone out, it renders or redirects. Use the Preferences menu item in the web UI."
+  },
+  "auth": {
+    "probe_url": "https://mastodon.social/",
+    "probe_js": "// Mastodon renders its own state into the document: <script id=\"initial-state\" type=\"application/json\">\n// carries meta.me (the logged-in account id) and meta.access_token (the token the web UI itself\n// uses for every API call). The session cookie (_session_id) is HttpOnly, so document.cookie is\n// not usable here — and is not needed.\n// VERIFIED SIGNED-OUT on mastodon.social 4.8.0-alpha (2026-09-12): the #initial-state element is\n// PRESENT, meta.access_token is null and meta.me is absent. The element existing is not the\n// verdict; the fields are.\nlet st = null;\ntry {\n  const el = document.getElementById('initial-state');\n  if (!el) return {signed_in:false, why:'no #initial-state element — this is not a mastodon web-UI document'};\n  st = JSON.parse(el.textContent || 'null');\n} catch (e) { return {signed_in:false, why:'#initial-state unparseable: ' + e.message}; }\nconst meta = (st && st.meta) || {};\nif (!meta.me || !meta.access_token) return {signed_in:false, why:'#initial-state present but meta.me/meta.access_token empty'};\nconst domain = meta.domain || location.host;\nlet as = null;\ntry {\n  const local = ((st && st.accounts) || {})[meta.me] || {};\n  as = local.acct || local.username || null;\n} catch (e) { as = null; }\nif (!as) {\n  // meta.me alone is only a numeric id; ask the instance for the handle. 401/403 here means the\n  // embedded token is dead, which IS a signed-out session.\n  try {\n    const r = await fetch('/api/v1/accounts/verify_credentials', {\n      credentials: 'include',\n      headers: {authorization: 'Bearer ' + meta.access_token, accept: 'application/json'}\n    });\n    if (r.status === 401 || r.status === 403) return {signed_in:false, why:'verify_credentials ' + r.status + ' — the token in #initial-state is dead'};\n    const j = await r.json();\n    if (j && j.username) as = j.acct || j.username;\n  } catch (e) { /* network/CORS only — do not flip the verdict on it */ }\n}\n// Never return meta.access_token. Handle + instance only.\nreturn {signed_in:true, as: (as ? as : 'id:' + meta.me) + '@' + domain};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://mastodon.social/explore"
+  },
+  "write": [],
+  "traps": [
+    "The <script id=\"initial-state\"> element is present on the SIGNED-OUT page too — verified on mastodon.social 4.8.0-alpha on 2026-09-12, where it carried \"access_token\": null and no \"me\". Gating on 'the initial-state element exists' reports every anonymous visitor as signed in.",
+    "Almost everything worth reading is readable with NO session: /api/v1/timelines/public, /api/v1/accounts/lookup, an account's statuses, the whole /explore surface. A feed that loads is therefore zero evidence of a session — only a 'who am I' endpoint or meta.me is.",
+    "/api/v1/accounts/verify_credentials answers 401 {\"error\":\"The access token is invalid\"} with no session (verified 2026-09-12) — it does NOT redirect and it does not 403. Any other endpoint's 200 must not be read as authentication.",
+    "The instance is the boundary. Cookies, the OAuth token in initial-state, the handle and the whole session are scoped to this host; being live on mastodon.social says nothing about any other instance, and the same person is a different account on each.",
+    "Mastodon rate-limits the API per token (documented default: a few hundred requests per 5 minutes, tighter for writes) and answers 429 with X-RateLimit-* headers. A throttled read comes back as a short or empty timeline rather than an obvious error, so a recipe must check the status and those headers before believing an empty feed."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "THIS FILE IS ONE INSTANCE. Mastodon is not a site, it is software: every instance is its own origin, its own accounts, its own cookies and its own rate limits, and mastodon.social is merely the biggest one. TO CLONE IT FOR ANOTHER INSTANCE: copy this file to sites/<that-host>.json and change `domain`, `home`, `login.url`, `logout.url/selector`, `auth.probe_url` and `read.fixture_url` — swap the host everywhere it appears. NOTHING in probe_js is host-specific (it reads #initial-state and fetches a relative /api/v1 path, and it reports the instance from meta.domain), so the probe copies over unchanged. Keep `status: \"unverified\"` in the copy: a probe verified on mastodon.social is not verified on an instance running a different Mastodon version or a fork (GoToSocial, Akkoma, Hometown and glitch-soc all speak the same API but do not all render the same initial-state). PROBE STRATEGY: (a) the site's own embedded state object, with (b) a credentialed who-am-I as a fallback for the handle only. The web UI bootstraps React from <script id=\"initial-state\" type=\"application/json\">, whose meta object carries `me` (the account id) and `access_token` (the OAuth token the UI itself uses). Both empty = signed out, verified against a real signed-out document. meta.me is only a numeric id, so when initial-state does not also carry the account record the probe asks /api/v1/accounts/verify_credentials with that token and takes `acct`/`username`; a 401/403 there means the embedded token is dead and IS a signed-out verdict, while a network/CORS failure is explicitly NOT allowed to flip the verdict. The probe never returns the token. WHAT A READ RECIPE SHOULD DO: use the REST API with the Bearer token lifted from initial-state's meta.access_token — GET /api/v1/timelines/home?limit=40 (home), /api/v1/notifications, /api/v1/accounts/verify_credentials then /api/v1/accounts/<id>/statuses. Paginate with the Link header (max_id/min_id), not by page number. For public reads no token is needed: /api/v1/timelines/public?local=true and /api/v2/search. WRITE: empty. POST /api/v1/statuses with an Idempotency-Key header is the documented publish path and would be a clean write verb, but nothing here has driven it, so it is not listed.",
+  "probe_checked": "2026-09-12: ran live in the fork and returned a clean signed_out verdict (no throw, no 'no verdict'). The signed-OUT path is proven; the signed-IN path is still a hypothesis."
+}

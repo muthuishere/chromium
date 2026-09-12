@@ -1,0 +1,39 @@
+{
+  "domain": "youtube.com",
+  "aliases": [
+    "youtube",
+    "yt",
+    "video",
+    "channel"
+  ],
+  "home": "https://www.youtube.com/",
+  "login": {
+    "url": "https://accounts.google.com/ServiceLogin?service=youtube",
+    "note": "Manual, by a human, in this profile — always (ADR-0008). This is a GOOGLE sign-in, not a YouTube one: signing in here signs the profile into every Google property, and Google is the most likely of these sites to challenge an unfamiliar browser (device prompt, passkey, or a code).",
+    "twofa": true
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://accounts.google.com/Logout",
+    "note": "UNVERIFIED — not driven from this fork. This signs the profile out of ALL Google services, not just YouTube; there is no YouTube-only logout. The in-page control is the avatar menu -> 'Sign out'. Blast radius makes this worth a human's confirmation."
+  },
+  "auth": {
+    "probe_url": "https://www.youtube.com/",
+    "probe_js": "// YouTube states it itself: ytcfg.data_.LOGGED_IN. Cookies are the wrong evidence here — the\n// readable ones (PREF, __Secure-3PAPISID) are present on a SIGNED-OUT page too, and the ones that\n// mean anything (LOGIN_INFO, SAPISID) are HttpOnly. Verified signed-out here 2026-09-12.\nconst img = document.querySelector('#avatar-btn img, ytd-topbar-menu-button-renderer img');\nconst cfg = (window.ytcfg && window.ytcfg.data_) ? window.ytcfg.data_ : null;\nif (cfg && typeof cfg.LOGGED_IN === 'boolean') {\n  return cfg.LOGGED_IN ? {signed_in:true, as: img && img.alt ? img.alt : undefined}\n                       : {signed_in:false, why:'ytcfg.LOGGED_IN is false'};\n}\nreturn img ? {signed_in:true, as: img.alt || undefined}\n           : {signed_in:false, why:'no ytcfg verdict and no avatar button'};"
+  },
+  "read": {
+    "verb": "youtube:channel-videos",
+    "fixture_url": "https://www.youtube.com/results?search_query=chromium"
+  },
+  "write": [],
+  "traps": [
+    "One shared browser, no mutex. Two lanes attach to a nondeterministic tab. Run `chrome-agent goto <url>` then `chrome-agent status` before believing any read.",
+    "The readable cookies (PREF, __Secure-3PAPISID) are present when signed OUT; the meaningful ones (LOGIN_INFO, SAPISID) are HttpOnly. `ytcfg.data_.LOGGED_IN` is YouTube stating it itself — use that. (promoted 2026-09-12, from note)",
+    "A read recipe here scrapes THE CURRENT PAGE, so the homepage yields 0 items and looks like drift. Verify from a results or channel page (`chrome-agent verify` uses /results?search_query=chromium). (promoted 2026-09-12, from note)",
+    "No write verb exists for this site. Do not improvise one by driving the DOM.",
+    "Verification rule: read the artifact back from the live page. A 2xx proves nothing here, and on some of these sites neither does a 5xx."
+  ],
+  "status": "verified",
+  "source": "hand",
+  "notes": "Converted from the CLI's `_auth_probe_js` case branch, `_verify_fixture` (youtube:channel-videos | /results?search_query=chromium) and playbooks/youtube.com/. Read verified 2026-09-12 via recipe:youtube:channel-videos; the same probe reported signed-OUT live on 2026-09-12, which is a working probe, not a broken one. Read-only here."
+}

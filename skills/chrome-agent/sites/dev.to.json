@@ -1,0 +1,38 @@
+{
+  "domain": "dev.to",
+  "aliases": [
+    "devto",
+    "dev",
+    "forem"
+  ],
+  "home": "https://dev.to/",
+  "login": {
+    "url": "https://dev.to/enter",
+    "note": "Mostly third-party SSO — GitHub, Google, Apple, Forem Passport — plus email+password. The SSO buttons open the provider's own page, so the human finishes there and lands back on dev.to. No second factor of its own; whatever the provider enforces applies.",
+    "twofa": false
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://dev.to/signout_confirm",
+    "note": "GET /signout_confirm only renders the confirmation page. The real sign-out is a DELETE to /users/sign_out carrying the CSRF token (Devise is configured sign_out_via :delete), so a human clicks the confirm button — a plain GET of /users/sign_out will NOT end the session."
+  },
+  "auth": {
+    "probe_url": "https://dev.to/",
+    "probe_js": "// Forem states it itself, twice. body[data-user-status] is rendered by the layout\n// (app/views/layouts/application.html.erb) and Forem's own checkUserLoggedIn() reads exactly that\n// attribute; the whole record is JSON in body.dataset.user (utilities/userData.js).\n// Cookies are not evidence: remember_user_token and the Rails session cookie are HttpOnly.\nconst b = document.body;\nconst status = b ? b.getAttribute('data-user-status') : null;\nlet as;\ntry {\n  const d = b && b.dataset ? b.dataset.user : null;\n  if (d) { const j = JSON.parse(d); as = j.username || j.name || undefined; }\n} catch (e) { /* a half-written dataset is not a verdict */ }\nif (as) return {signed_in:true, as};\nif (status === 'logged-in') return {signed_in:true, why:'body[data-user-status]=logged-in; body.dataset.user not populated yet'};\n// TRAP, same shape as reddit's me.json: /async_info/base_data answers HTTP 200 when signed OUT too\n// — the body is then {broadcast, param, token} with NO `user` key at all. Check the FIELD, not the\n// status. Second trap: `user` is a JSON *string* (user_data does .to_json), so it needs a 2nd parse.\ntry {\n  const r = await fetch('/async_info/base_data', {credentials:'include', headers:{accept:'application/json'}});\n  const j = await r.json();\n  if (!j || !j.user) return {signed_in:false, why:'base_data carries no user field'};\n  const u = typeof j.user === 'string' ? JSON.parse(j.user) : j.user;\n  return {signed_in:true, as: u.username || u.name || undefined};\n} catch (e) { return {signed_in:false, why:'no body user data; base_data failed: ' + e.message}; }"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://dev.to/"
+  },
+  "write": [],
+  "traps": [
+    "The session cookies (_Forem_Session / remember_user_token) are HttpOnly — invisible to document.cookie, so a cookie check reports a live session as logged out.",
+    "/async_info/base_data answers HTTP 200 WHEN SIGNED OUT. The signed-out body is {broadcast, param, token} with no `user` key at all. The status code is not the verdict; the presence of `user` is. Same failure shape as reddit's me.json.",
+    "In that response `user` is a JSON STRING, not an object (the controller does user_data.to_json inside the JSON), so it needs a second JSON.parse before username exists.",
+    "dev.to is edge-cached and much of the page is hydrated client-side, so a probe that runs a fraction of a second too early can see body.dataset.user unset on a page that is genuinely signed in — that is why the fetch fallback exists and why it, not the dataset, is authoritative.",
+    "Anonymously fetched HTML always carries body[data-user-status=\"logged-out\"] (confirmed here 2026-09-12), which is exactly what a cached page would also show. Never treat a scraped copy of the page as a session verdict."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "Probe strategy (a) then (b), and both were read out of Forem's own source rather than guessed. (a) body[data-user-status] is rendered by app/views/layouts/application.html.erb and is literally what Forem's own utilities/checkUserLoggedIn.js tests; body.dataset.user is the JSON record that utilities/userData.js parses. (b) is a credentialed same-origin GET of /async_info/base_data, the endpoint the app itself uses to hydrate the current user (app/controllers/async_info_controller.rb) — checked for the `user` FIELD because it returns 200 either way. Cookies are never consulted. UNVERIFIED: read off the upstream Forem repo (forem/forem@main) on 2026-09-12 but never executed against a live signed-in tab; dev.to runs its own fork, so the field names are the thing to confirm. A READ recipe has an easy path here: the public Forem API v1 at https://dev.to/api/articles?per_page=30 needs no session at all (send accept: application/vnd.forem.api-v1+json), and the PERSONALIZED feed is the session-cookie endpoint GET /api/feed (also /api/feed/:timeframe) — that pair, not DOM scraping, is where the next person should start."
+}

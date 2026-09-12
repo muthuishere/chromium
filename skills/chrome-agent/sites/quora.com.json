@@ -1,0 +1,34 @@
+{
+  "domain": "quora.com",
+  "aliases": [
+    "quora"
+  ],
+  "home": "https://www.quora.com/",
+  "login": {
+    "url": "https://www.quora.com/",
+    "note": "Signed out, the home page IS the login wall — Google / Facebook / email on one card. The provider buttons open a popup rather than navigating, so the operator must keep the share open and must not close what looks like a stray window. Quora is aggressive about new-device and new-IP checks and may hold the session behind an emailed code.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "a[href*=\"/logout\"]",
+    "note": "Reached through the profile menu in the top bar; the item is not in the DOM until that menu is open. A GET of https://www.quora.com/logout has historically worked but is unverified here and may simply bounce to the home wall while leaving the session intact — check with 'auth' afterwards rather than believing the navigation."
+  },
+  "auth": {
+    "probe_url": "https://www.quora.com/",
+    "probe_js": "// Do NOT gate on cookies here: the cookies that carry a Quora session are HttpOnly, and the ones\n// document.cookie can see are set for signed-out visitors too. Ask the page's own state instead.\nlet why;\ntry {\n  const g = window.ansFrontendGlobals;\n  const u = g && ((g.data && g.data.viewer) || g.viewer || g.user);\n  if (u && typeof u === 'object' && (u.id || u.uid || u.name || u.username)) {\n    return {signed_in: true, as: u.name || u.username || undefined, why: 'ansFrontendGlobals names a viewer'};\n  }\n  if (g) why = 'ansFrontendGlobals present but names no viewer';\n} catch (e) { why = 'ansFrontendGlobals read failed: ' + e.message; }\ntry {\n  const scripts = document.querySelectorAll('script');\n  for (let i = 0; i < scripts.length; i++) {\n    const t = scripts[i].textContent || '';\n    if (!t || t.length > 2000000) continue;\n    const m = t.match(/\"(?:is_logged_in|logged_in|isLoggedIn)\"\\s*:\\s*(true|false)/);\n    if (m) {\n      if (m[1] === 'true') return {signed_in: true, why: 'inline bootstrap logged-in flag is true'};\n      why = 'inline bootstrap logged-in flag is false';\n      break;\n    }\n  }\n} catch (e) { /* inline scan is best-effort; never fatal */ }\n// DOM, LAST and deliberately scoped to the shell: a signed-OUT question page is full of\n// a[href^=\"/profile/\"] links belonging to ANSWER AUTHORS. An unscoped selector calls that signed in.\nconst prof = document.querySelector('#root header a[href^=\"/profile/\"], header a[href^=\"/profile/\"], nav a[href^=\"/profile/\"]');\nif (prof) {\n  const href = prof.getAttribute('href') || '';\n  return {signed_in: true, as: href.replace(/^\\/profile\\//, '') || undefined, why: 'profile link in the top shell'};\n}\nconst wall = document.querySelector('form[action*=\"login\"], a[href*=\"/login\"], input[name=\"email\"]');\nreturn {signed_in: false, why: why || (wall ? 'login wall rendered' : 'no viewer state and no profile link in the shell')};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://www.quora.com/"
+  },
+  "write": [],
+  "traps": [
+    "A signed-OUT question page is full of a[href^=\"/profile/\"] links — every answer author has one. An unscoped profile-link selector therefore reports every logged-out question page as signed in. The probe only accepts such a link inside the header/nav shell, and this is the single easiest way to get this file wrong.",
+    "Quora shows a partial answer and a 'continue reading' gate to signed-out visitors. Content coming back is not evidence of a session; truncated content is evidence of the opposite.",
+    "The session cookies are HttpOnly; the readable ones are set for anonymous visitors too, so no cookie here separates the two states."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "PROBE STRATEGY, in falling order of trust: (a) 'window.ansFrontendGlobals' — Quora's own front-end state object; if it names a viewer, that is the site's verdict, not ours. (b) an inline-script scan for the bootstrap's own logged-in boolean, because Quora ships a large JSON payload inline and a false there is as informative as a true. (c) a DOM check, LAST and scoped to the shell, for the reason in traps[0]. No cookie is read at any layer. Everything here is documentation-and-structure reasoning, not a live run: the exact key path under ansFrontendGlobals is the weakest link and is why status is 'unverified'. A READ RECIPE should target Quora's GraphQL-ish POST endpoint (/graphql/gql_para_POST) that the page itself calls with its own formkey/CSRF header, fetching a question's answers as JSON; DOM scraping fights the 'continue reading' gate and the virtualised answer list. WRITE is empty: answering and commenting are exactly the actions that get an account flagged as automated, and no reviewed write path exists here."
+}

@@ -4,6 +4,7 @@ verbs:
   my-posts: chrome-agent recipe linkedin:my-posts
   notifications: chrome-agent recipe linkedin:notifications
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://www.linkedin.com/
 ---
 
 # linkedin.com — read

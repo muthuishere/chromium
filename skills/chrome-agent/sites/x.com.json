@@ -1,0 +1,49 @@
+{
+  "domain": "x.com",
+  "aliases": [
+    "x",
+    "twitter",
+    "twitter.com",
+    "tweet",
+    "timeline",
+    "retweet"
+  ],
+  "home": "https://x.com/",
+  "login": {
+    "url": "https://x.com/login",
+    "note": "Manual, by a human, in this profile — always (ADR-0008). Handle/email plus password; X very often inserts an extra 'confirm your username/phone' step and an authenticator or emailed code on a new device. `chrome-agent login x.com` opens the page and types nothing.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "cookies",
+    "note": "UNVERIFIED, and deliberately not guessed. X has no plain GET logout route: the UI POSTs to /i/api/1.1/account/logout.json with the ct0 csrf header, reached through the account switcher (bottom-left avatar -> 'Log out'). Neither the endpoint replay nor a selector has been driven from this fork, so the honest method here is clearing the profile's x.com/twitter.com cookies."
+  },
+  "auth": {
+    "probe_url": "https://x.com/",
+    "probe_js": "// auth_token is HttpOnly; ct0 (the CSRF cookie) is not. But ct0 alone is WEAK — it is set during\n// the login flow, before authentication completes — so it is necessary, not sufficient. The\n// profile link is the corroborating evidence and the only source of the handle, and on a cold tab\n// it can paint late, so wait for it briefly before deciding rather than calling a live session\n// logged out because the SPA had not rendered.\nconst c = (() => { try { return document.cookie; } catch (e) { return ''; } })();\nconst link = () => document.querySelector('a[data-testid=\"AppTabBar_Profile_Link\"]');\nlet a = link();\nfor (let i = 0; i < 10 && !a; i++) { await new Promise(r => setTimeout(r, 300)); a = link(); }\nconst as = a ? a.getAttribute('href').replace(/^\\//,'') : undefined;\nif (!/\\bct0=/.test(c) && !a) return {signed_in:false, why:'no ct0 cookie and no profile link'};\nif (!a) return {signed_in:false, inconclusive:true, why:'ct0 present but no profile link after 3s — a half-completed login flow looks exactly like this'};\nreturn {signed_in:true, as};"
+  },
+  "read": {
+    "verb": "x:timeline",
+    "fixture_url": "https://x.com/"
+  },
+  "write": [
+    "x:post",
+    "x:reply",
+    "x:delete-post",
+    "x:like",
+    "x:repost"
+  ],
+  "traps": [
+    "Strict CSP — `evalAsync` fails silently; use `evalwithcsp`.",
+    "Rate limiting appears as an empty timeline, not an error. Empty never means 'nothing there'; it means try later.",
+    "One shared browser, no mutex. Two lanes attach to a nondeterministic tab. Run `chrome-agent goto <url>` then `chrome-agent status` before believing any read.",
+    "`auth_token` is HttpOnly; `ct0` (the csrf cookie) is not and only exists for a signed-in session. Corroborate with the profile link — it is also the only source of the handle. (promoted 2026-09-12, from note)",
+    "x:post and x:reply drive the native composer rather than replaying the API, because X's own JS computes x-client-transaction-id and a replay gets HTTP 226.",
+    "chrome-agent does NOT expand imagePath for x:reply — pass imageB64. The recipe returns mediaRequested/mediaAttached so an ignored image is visible.",
+    "Verification rule: read the artifact back from the live page. A 2xx proves nothing here, and on some of these sites neither does a 5xx.",
+    "`ct0` is set during the LOGIN FLOW, before authentication completes — so ct0 alone is not a session. Corroborate with the profile link, and wait for it: on a cold tab the SPA paints late and an immediate probe calls a live session logged out."
+  ],
+  "status": "verified",
+  "source": "hand",
+  "notes": "Converted from the CLI's `_auth_probe_js` case branch (which covers x.com and twitter.com with the same probe) and playbooks/x.com/. Probe verified live 2026-09-12 (returned a real handle); read verified 2026-09-12 via recipe:x:timeline. Legacy host twitter.com has its own read verb, x:timeline-twitter. Writes staged unless opts.confirm=true."
+}

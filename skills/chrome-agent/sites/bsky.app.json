@@ -1,0 +1,40 @@
+{
+  "domain": "bsky.app",
+  "aliases": [
+    "bluesky",
+    "bsky",
+    "atproto"
+  ],
+  "home": "https://bsky.app/",
+  "login": {
+    "url": "https://bsky.app/",
+    "note": "The landing page IS the login form (handle or email + password, or 'Sign in with a different account' for a self-hosted PDS). No SSO, no QR. An app password from Settings works here too and is the safer thing to type into a shared browser profile. On success the client writes the session into localStorage under BSKY_STORAGE for this origin only.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "a[href=\"/settings/account\"]",
+    "note": "There is no logout URL. Sign out from Settings > Account > Sign out, or from the account switcher. Clearing cookies does NOTHING here — the session lives in localStorage; the equivalent nuke is removing the BSKY_STORAGE key, which also throws away every remembered account and every client preference in the same blob.",
+    "url": "https://bsky.app/settings/account"
+  },
+  "auth": {
+    "probe_url": "https://bsky.app/",
+    "probe_js": "// Bluesky does NOT keep its session in a cookie. The web client writes its whole persisted store\n// into localStorage under the key BSKY_STORAGE (social-app, src/state/persisted/index.web.ts),\n// shaped {session:{accounts:[{service,did,handle,accessJwt?,refreshJwt?,...}],currentAccount:{did,...}}}.\n// There is also no same-origin \"who am I\" to ask: bsky.app is a client, and every call it makes is\n// XRPC to the PDS/AppView with a Bearer token — so a credentialed fetch from this origin proves\n// nothing. localStorage IS the site's own state object here, so that is what this reads.\nlet raw = null;\ntry { raw = window.localStorage.getItem('BSKY_STORAGE'); }\ncatch (e) { return {signed_in:false, why:'localStorage unreadable on this origin: ' + e.message}; }\nif (!raw) return {signed_in:false, why:'no BSKY_STORAGE key in localStorage (never signed in on this profile, or wrong origin)'};\nlet s = null;\ntry { s = JSON.parse(raw); }\ncatch (e) { return {signed_in:false, why:'BSKY_STORAGE is not JSON: ' + e.message}; }\nconst sess = (s && s.session) || {};\nconst accounts = Array.isArray(sess.accounts) ? sess.accounts : [];\nconst cur = sess.currentAccount || null;\nif (!cur || !cur.did) return {signed_in:false, why:'BSKY_STORAGE holds ' + accounts.length + ' remembered account(s) but no currentAccount'};\nlet acct = cur;\nfor (const a of accounts) { if (a && a.did === cur.did) { acct = a; break; } }\n// TRAP: signing out LEAVES the account in accounts[] with handle and did intact and only the\n// tokens stripped (that is the account picker on the login screen). \"A handle is in localStorage\"\n// is therefore NOT a session — the token fields are the gate.\nif (!acct.accessJwt && !acct.refreshJwt) return {signed_in:false, why:'account is remembered but has no accessJwt/refreshJwt — signed out'};\nlet dom = '';\ntry {\n  dom = document.querySelector('[data-testid=\"composeFAB\"], [data-testid=\"viewHeaderDrawerBtn\"], a[href^=\"/profile/\"][aria-label]')\n    ? '; signed-in UI present' : '';\n} catch (e) { dom = ''; }\nconst as = acct.handle || cur.handle || cur.did;\n// Never return a token. `as` is a handle or a did, both public.\nreturn {signed_in:true, as: as, why:'BSKY_STORAGE currentAccount has session tokens' + dom};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://bsky.app/"
+  },
+  "write": [],
+  "traps": [
+    "Signing out does NOT remove the account from BSKY_STORAGE — social-app leaves the entry in session.accounts[] with did and handle intact and only strips accessJwt/refreshJwt (both are optional in its zod schema, exactly so an expired session can persist). A probe that gates on 'a handle is in localStorage' reports a signed-out profile as live.",
+    "The persisted blob is validated as ONE zod schema, and social-app's own schema.ts warns that a single failing field makes tryParse discard the ENTIRE persisted state — every account and every preference — so the app boots logged out with defaults. A version skew can therefore turn a working session into 'never signed in' with no error anywhere.",
+    "BSKY_STORAGE is written asynchronously and fanned out across tabs over a BroadcastChannel ('BSKY_BROADCAST_CHANNEL'); the project's own issue reports the write landing 15-20s later in a throttled/background tab. Probing immediately after a hand login or logout can read the PREVIOUS state. Wait, or re-probe.",
+    "No cookie on bsky.app means anything. The app is a pure client: reads and writes are XRPC calls to the account's PDS / the AppView carrying a Bearer token from localStorage. Cookie-shaped reasoning (and any credentialed same-origin fetch) is noise here.",
+    "bsky.app is one client of many for the same account. A session here is not a session on the PDS host (bsky.social) or on any other atproto client, and logging out here does not revoke anything server-side."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "PROBE STRATEGY: (a) the site's own embedded state object. Bluesky is the exception to the cookie rule in the other site files — there is no session cookie at all. The web client persists {session:{accounts[],currentAccount}} to localStorage under the literal key 'BSKY_STORAGE' (confirmed in bluesky-social/social-app, src/state/persisted/index.web.ts: `const BSKY_STORAGE = 'BSKY_STORAGE'`, and the account/currentAccount shape in src/state/persisted/schema.ts). The probe reads that key, requires a currentAccount.did AND a matching accounts[] entry that still holds a token, and reports the handle. A DOM check (composeFAB / profile link) is appended to `why` as corroboration only — it can be legitimately absent on a route that has not rendered, so it must never flip the verdict. The probe returns a handle or a did and NEVER a token. localStorage is origin-scoped, so this probe is only meaningful on the bsky.app origin. WHAT A READ RECIPE SHOULD DO: not scrape the DOM. Take the account's `service`/`pdsUrl` and accessJwt out of BSKY_STORAGE and call XRPC directly: app.bsky.feed.getTimeline (home feed), app.bsky.feed.getAuthorFeed?actor=<did> (one account), app.bsky.notification.listNotifications, each as GET <service>/xrpc/<nsid> with `Authorization: Bearer <accessJwt>`. Public, unauthenticated reads of public data can go to https://public.api.bsky.app/xrpc/... with no token at all, which is the cheaper path when no session is needed. An expired accessJwt returns 400 ExpiredToken and is refreshed with com.atproto.server.refreshSession using the refreshJwt — a read recipe should treat ExpiredToken as 'refresh', not as 'logged out'. WRITE: left empty on purpose. Posting is com.atproto.repo.createRecord on app.bsky.feed.post and is genuinely easy, but no verb exists here yet and an unverified write path in this file would read as a green light nobody has driven.",
+  "probe_checked": "2026-09-12: ran live in the fork and returned a clean signed_out verdict (no throw, no 'no verdict'). The signed-OUT path is proven; the signed-IN path is still a hypothesis."
+}

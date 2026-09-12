@@ -1,0 +1,37 @@
+{
+  "domain": "indiehackers.com",
+  "aliases": [
+    "ih",
+    "indiehackers",
+    "indie-hackers"
+  ],
+  "home": "https://www.indiehackers.com/",
+  "login": {
+    "url": "https://www.indiehackers.com/sign-in",
+    "note": "Email + password, with Google and X as alternatives. Historically an emailed sign-in link is offered too, and that link opens a session in whichever browser handles it — which must be this one. No SSO redirect chain for the email path, so the share can usually be closed as soon as the feed renders.",
+    "twofa": false
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "a[href*=\"sign-out\"], a[href*=\"signout\"], button[data-action*=\"signOut\"]",
+    "note": "Behind the avatar menu in the header; not present in the DOM until the menu is opened. Selector is a hypothesis — confirm it against the live shell before relying on it."
+  },
+  "auth": {
+    "probe_url": "https://www.indiehackers.com/",
+    "probe_js": "// Session material here is an HttpOnly cookie, so document.cookie is blind to it. Three layers,\n// each one falling through quietly: embedded state, then a credentialed who-am-I, then the DOM.\nlet why;\ntry {\n  const el = document.getElementById('__NEXT_DATA__');\n  if (el && el.textContent) {\n    const root = JSON.parse(el.textContent);\n    const seen = new Set(); const stack = [root];\n    while (stack.length) {\n      const n = stack.pop();\n      if (!n || typeof n !== 'object' || seen.has(n)) continue;\n      seen.add(n);\n      for (const k of Object.keys(n)) {\n        const v = n[k];\n        if ((k === 'currentUser' || k === 'viewer' || k === 'me') && v && typeof v === 'object' && (v.username || v.id)) {\n          return {signed_in: true, as: v.username || v.name || undefined, why: '__NEXT_DATA__.' + k};\n        }\n        if (v && typeof v === 'object') stack.push(v);\n      }\n    }\n    why = '__NEXT_DATA__ present but names no viewer';\n  }\n} catch (e) { why = '__NEXT_DATA__ parse failed: ' + e.message; }\ntry {\n  const r = await fetch('/api/v3/me', {credentials: 'include', headers: {accept: 'application/json'}});\n  if (r.status === 401 || r.status === 403) return {signed_in: false, why: '/api/v3/me ' + r.status};\n  if (r.ok) {\n    const j = await r.json();\n    const u = (j && (j.user || j.data)) || j;\n    // A 200 is not the verdict — the identifying FIELD is. A wrong path answers 200 with HTML or\n    // with an unrelated body, and JSON.parse/`username` are what catch that.\n    if (u && (u.username || u.id)) return {signed_in: true, as: u.username || undefined, why: '/api/v3/me named a user'};\n    why = '/api/v3/me answered 200 with no user field';\n  }\n} catch (e) { /* endpoint is a hypothesis; failure just means \"no answer here\" */ }\nconst mine = document.querySelector('header a[href^=\"/@\"], nav a[href^=\"/@\"], a[href=\"/dashboard\"], a[href*=\"/new-post\"]');\nif (mine) {\n  const href = mine.getAttribute('href') || '';\n  return {signed_in: true, as: href.startsWith('/@') ? href.slice(2) : undefined, why: 'signed-in-only nav link'};\n}\nconst wall = document.querySelector('a[href*=\"/sign-in\"], a[href*=\"/signin\"], a[href*=\"/login\"], a[href*=\"/sign-up\"]');\nreturn {signed_in: false, why: why || (wall ? 'sign-in link in the nav' : 'no signed-in nav link found')};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://www.indiehackers.com/"
+  },
+  "write": [],
+  "traps": [
+    "The whole site reads fine while signed out — feed, posts, comments, milestones. There is no content difference to detect a session by; only the header controls and the composer change.",
+    "The session cookie is HttpOnly, so document.cookie is blind to it on a live session.",
+    "'/api/v3/me' in this probe is an UNVERIFIED guess at the who-am-I endpoint. It is written to fall through silently on 404/HTML rather than to conclude anything, so a wrong path costs nothing — but do not read a green verdict from that layer until a live run has confirmed the path exists."
+  ],
+  "status": "verified",
+  "source": "agent-research",
+  "notes": "PROBE STRATEGY: three layers, each falling through quietly rather than concluding. (a) '__NEXT_DATA__' walked for a currentUser/viewer node — the app's own boot state is the cheapest honest answer. (b) a credentialed same-origin fetch of a who-am-I endpoint, where the verdict is the presence of the username/id FIELD and never the 200: a wrong path answers 200 with HTML, and JSON.parse plus the field check are what catch that. (c) the DOM — a /@handle link or the dashboard/new-post control in the nav. Cookies are never consulted (see traps). A READ RECIPE should fetch the site's own JSON feed endpoint (the one the client calls for the home/latest stream) rather than scraping cards, and should carry the post id so a follow-up can pull a thread; until that is captured, read.verb stays 'eval' against the home fixture. WRITE is empty: posting and commenting exist but no reviewed, rate-aware path has been proven here, and IndieHackers is a small community where an automated post is noticed.",
+  "probe_checked": "positive path PROVEN live 2026-09-12: ran in the fork against a signed-in session and returned signed_in. It returns no `as` — the nav-link branch names nobody, so identity is still unproven."
+}

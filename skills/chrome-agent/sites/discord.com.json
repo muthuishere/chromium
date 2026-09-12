@@ -1,0 +1,35 @@
+{
+  "domain": "discord.com",
+  "aliases": [
+    "discord"
+  ],
+  "home": "https://discord.com/channels/@me",
+  "login": {
+    "url": "https://discord.com/login",
+    "note": "Email + password, or the QR code scanned from a logged-in phone. Discord challenges new devices and new IPs hard: expect an emailed verification code, a hCaptcha, and on some accounts a mandatory authenticator prompt. Keep the share open — this is one of the sites most likely to need several minutes of a human's hands.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "dom",
+    "selector": "[aria-label=\"Log Out\"], [class*=\"logout\"]",
+    "note": "Use the in-app Log Out (User Settings, bottom of the left column). Clearing cookies does NOT reliably end a Discord web session — the client does not keep its session material in cookies alone — so a cookie-based logout can leave a session that still opens on the next launch."
+  },
+  "auth": {
+    "probe_url": "https://discord.com/channels/@me",
+    "probe_js": "// DELIBERATE OMISSION — READ THIS BEFORE \"IMPROVING\" THIS PROBE.\n// (1) The web client keeps an account credential in browser storage. This probe does not read it,\n//     does not test for it, does not name it and never logs it. Lifting that value out of the page\n//     turns a human session into a self-bot, which is exactly what Discord's ToS forbids and what\n//     gets accounts terminated. The evidence below needs no credential at all.\n// (2) Discord's REST API authenticates on an Authorization header, NOT on cookies. A credentialed\n//     same-origin fetch of /api/v9/users/@me therefore answers 401 on a perfectly live session.\n//     Do not \"fix\" this probe by adding that fetch — it is a false negative by construction.\nlet why;\ntry {\n  if (/^\\/(login|register)/.test(location.pathname)) {\n    const f = document.querySelector('input[name=\"email\"], form[class*=\"authBox\"], [class*=\"authBox\"]');\n    if (f) return {signed_in: false, why: 'login form rendered'};\n  }\n} catch (e) { /* location is always readable here, but never let it be fatal */ }\n// The user area at the bottom of the sidebar mounts only for an authenticated client.\nconst panel = document.querySelector('[aria-label=\"User area\"], section[class*=\"panels\"], [class*=\"panels-\"] [class*=\"avatarWrapper\"]');\nif (panel) {\n  let as;\n  try {\n    const tag = document.querySelector('[class*=\"nameTag\"] [class*=\"title\"], [class*=\"nameTag\"], [class*=\"panels\"] [class*=\"username\"]');\n    if (tag && tag.textContent) as = tag.textContent.trim().split('\\n')[0].slice(0, 64) || undefined;\n  } catch (e) { /* identity is a nicety; the verdict does not depend on it */ }\n  return {signed_in: true, as: as, why: 'user area panel is mounted'};\n}\nconst rail = document.querySelector('[aria-label=\"Servers\"], nav[class*=\"guilds\"]');\nif (rail) return {signed_in: true, why: 'server rail is mounted'};\nreturn {signed_in: false, why: why || 'no user area and no server rail — client is not authenticated, or the SPA has not finished booting (give it a few seconds and re-probe)'};\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://discord.com/channels/@me"
+  },
+  "write": [],
+  "traps": [
+    "https://discord.com/ is the MARKETING site and renders a 'Login' button whether or not a session exists. Probing the bare root reports every live session as logged out. Probe /channels/@me — that is why probe_url overrides home's usual role here.",
+    "Discord's REST API authenticates on an Authorization header, NOT on cookies. A credentialed same-origin fetch of /api/v9/users/@me answers 401 on a perfectly live session — a false negative by construction. Do not add that fetch to the probe.",
+    "The web client is a slow-booting SPA. Probing within a second or two of navigation finds neither the user area nor the server rail and looks exactly like signed-out. The probe says so in its 'why' rather than pretending certainty; re-probe after a few seconds.",
+    "Class names in the DOM are hashed and change with client builds, so the selectors here are substring matches and WILL rot. When this probe goes wrong it goes wrong by reporting logged-out — which is the safe direction, but it is still a page change, not an auth change."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "This is the DISCORD WEB CLIENT, and this definition is deliberately READ-ONLY, for a session a human logged into by hand. Token-based automation — lifting the client's account credential out of browser storage and driving the API with it — is a self-bot, which Discord's Terms of Service prohibit and enforce with account termination. So: the probe does not read, test for, name, or log that credential in any way, not even to check whether it is present; there is no code path here that touches it, and adding one would change what this file is. WRITE is [] for the same reason and should stay []. PROBE STRATEGY: a pure DOM signal on /channels/@me — the user-area panel at the foot of the sidebar (and the server rail as a second witness) mount only for an authenticated client, and neither requires a credential to observe. Option (b) from the schema's preference order, a credentialed who-am-I fetch, is unavailable here for the header-not-cookies reason in traps[1]; that is the whole justification for going straight to DOM. A READ RECIPE, if one is ever written, should read rendered message nodes out of an already-open channel — never call the API with a lifted credential; the ToS line is about the credential, not about the reading."
+}

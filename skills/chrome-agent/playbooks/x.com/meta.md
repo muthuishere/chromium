@@ -1,6 +1,6 @@
 ---
 domain: x.com
-aliases: x, twitter, tweet, timeline, retweet
+aliases: x, twitter, twitter.com, tweet, timeline, retweet
 staged: true
 last_verified: 2026-09-12 (recipe:x:timeline)
 source: generated from `chrome-agent recipes --json`

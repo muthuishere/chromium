@@ -1,0 +1,38 @@
+{
+  "domain": "substack.com",
+  "aliases": [
+    "substack"
+  ],
+  "home": "https://substack.com/home",
+  "login": {
+    "url": "https://substack.com/sign-in",
+    "note": "Substack prefers a passwordless emailed magic link ('Sign in with email'); there is also a password form behind 'Sign in with password', plus Google/Apple/Twitter buttons. The magic-link flow means the human needs the mailbox open in another window, and the link opens a NEW tab which is where the session actually lands.",
+    "twofa": true
+  },
+  "logout": {
+    "method": "url",
+    "url": "https://substack.com/sign-out",
+    "note": "Sign-out is reachable from the account menu; the session cookies (connect.sid / substack.sid) are HttpOnly, so clearing them from JS is not possible. A publication subdomain shares the login but is a separate origin — check substack.com itself after signing out."
+  },
+  "auth": {
+    "probe_url": "https://substack.com/",
+    "probe_js": "// Two independent signals, BOTH observed signed-out on substack.com on 2026-09-12:\n//  (1) the page's own state object — window._preloads.userSettings.user_id is null when signed out\n//      and set to the account id when signed in (the key exists either way);\n//  (2) GET /api/v1/subscriptions — HTTP 401 with {\"errors\":[{\"msg\":\"Please sign in\", ...}]} when\n//      signed out, the caller's own subscriptions when signed in.\n// The session cookies (connect.sid / substack.sid) are HttpOnly, so document.cookie cannot be the\n// gate. NOTE: a 200 alone is not the verdict either — the identifying field is.\nlet uid = null;\ntry {\n  let p = window._preloads;\n  if (typeof p === 'string') p = JSON.parse(p);\n  const us = p && p.userSettings;\n  if (us && us.user_id) uid = us.user_id;\n} catch (e) { uid = null; }\ntry {\n  const r = await fetch('/api/v1/subscriptions', {credentials:'include', headers:{accept:'application/json'}});\n  if (r.status === 401 || r.status === 403) return {signed_in:false, why:'subscriptions ' + r.status + ' (please sign in)'};\n  let j = null;\n  try { j = await r.json(); } catch (e) { j = null; }\n  const subs = (j && Array.isArray(j.subscriptions)) ? j.subscriptions : [];\n  const u = (j && (j.user || j.currentUser)) || (subs[0] && subs[0].user) || null;\n  if (u && (u.handle || u.name || u.id)) return {signed_in:true, as: u.handle || u.name || ('substackid:' + u.id)};\n  if (uid) return {signed_in:true, as:'substackid:' + uid, why:'subscriptions ' + r.status + ' carried no user object; _preloads.userSettings.user_id is set'};\n  return {signed_in:false, why:'subscriptions ' + r.status + ' but no user field in the body and _preloads.userSettings.user_id is null'};\n} catch (e) {\n  if (uid) return {signed_in:true, as:'substackid:' + uid, why:'subscriptions fetch failed (' + e.message + '); falling back to _preloads.userSettings.user_id'};\n  return {signed_in:false, why:'subscriptions fetch failed and _preloads.userSettings.user_id is null: ' + e.message};\n}\n"
+  },
+  "read": {
+    "verb": "eval",
+    "fixture_url": "https://substack.com/home"
+  },
+  "write": [],
+  "traps": [
+    "GET /api/v1/subscriptions answers HTTP 401 with a JSON BODY when signed out — {\"errors\":[{\"msg\":\"Please sign in\", \"msgHTML\":\"Please <a ...>sign in</a>.\"}]} (verified 2026-09-12). It is valid JSON and it parses cleanly, so any check of the shape 'the fetch resolved and the body parsed' calls a signed-out session live. Read the status, then read the field.",
+    "window._preloads.userSettings exists on the signed-out page with user_id: null (verified 2026-09-12 on both substack.com/ and a publication subdomain). The key's presence is not the answer, its value is.",
+    "substack.com/home 302-redirects to / when signed out (verified 2026-09-12) — not a 401, not a 404. A fetch that follows redirects lands on a 200 marketing page, which is exactly what 'it worked' looks like.",
+    "Every publication is its own origin: <pub>.substack.com serves its own _preloads and its own /api/v1/*. A relative API fetch made from a publication page hits the publication host, not substack.com, and the two do not return the same user-scoped data. Probe on substack.com.",
+    "In the HTML, _preloads is assigned as window._preloads = JSON.parse(\"...\") — a JSON string inside a JSON string, so anything scraping the markup must unescape twice (this is what yt-dlp's extractor does). In a live page it is already an object; the probe handles both.",
+    "Neither /api/v1/user nor /api/v1/profile exists on substack.com: both answer 404 with an HTML page, not a JSON error (verified 2026-09-12). Guessing a REST-looking who-am-I path here gets an HTML body and a confident wrong answer."
+  ],
+  "status": "unverified",
+  "source": "agent-research",
+  "notes": "PROBE STRATEGY: (b) a credentialed same-origin fetch of a session-gated endpoint, corroborated by (a) the page's own state object. Both halves were checked against live signed-out responses on 2026-09-12: GET /api/v1/subscriptions returns 401 {\"errors\":[{\"msg\":\"Please sign in\"}]} with no session, and window._preloads.userSettings.user_id is null on a signed-out document. The probe reads _preloads first (free, no request), then fetches /api/v1/subscriptions: 401/403 is a signed-out verdict, and a 200 must still carry a user object (or a non-null _preloads user_id) before it counts — a bare 200 is explicitly not enough. The signed-in shape of that body was NOT observed (no session was available), so the probe accepts j.user / j.currentUser / subscriptions[0].user and falls back to the _preloads id; that fallback is the part most likely to need adjusting on first live verification. The session cookies are HttpOnly, so document.cookie is never consulted. WHAT A READ RECIPE SHOULD DO: read the internal JSON API rather than the DOM, on the right origin. For the signed-in reader surface, /api/v1/subscriptions is the list of what this account follows, and the Notes surface is under /api/v1/notes; both need the session cookie and are same-origin on substack.com. For any publication, the stable and well-worn path is https://<pub>.substack.com/api/v1/archive?sort=new&limit=12&offset=0 for the post list and /api/v1/posts/<slug> for one post, neither of which needs a session for free content. For a single rendered page, window._preloads.post / _preloads.pub carries the whole post object already parsed. Paywalled bodies require the session and are the one place a read genuinely depends on auth. WRITE: empty — no publish path here has been observed, and Substack's write endpoints (notes, comments, drafts) all carry CSRF material minted in the page that no verb here captures yet.",
+  "probe_checked": "2026-09-12: ran live in the fork and returned a clean signed_out verdict (no throw, no 'no verdict'). The signed-OUT path is proven; the signed-IN path is still a hypothesis."
+}

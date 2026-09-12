@@ -2,6 +2,7 @@
 verbs:
   channel-videos: chrome-agent recipe youtube:channel-videos
   eval: chrome-agent evalwithcsp '<js>'
+  page: https://www.youtube.com/results?search_query=chromium
 ---
 
 # youtube.com — read
