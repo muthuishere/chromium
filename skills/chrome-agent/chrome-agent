@@ -1010,8 +1010,27 @@ profile_delete(){ local dir="${1:-}" yes="${2:-}"
 # ---- doctor (ADR 0006) -----------------------------------------------------------------------
 # A CLI newer than its engine discovers that as a command that hangs forever, which is the worst
 # error a system can give. doctor asks every question whose wrong answer produces a hang.
+# _engine_probe — ADR 0006 says a CLI newer than its engine must not discover that as a hang. The
+# spool protocol has no VERSION verb (a fork change, not a CLI one), so until it does, doctor asks
+# the engine what it can actually DO, each question under its own timeout. A missing capability is
+# then a named line in a report instead of a command that never returns.
+_to(){ if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
+_engine_probe(){
+  local live=false ev=false eva=false tabid=false shot=false
+  if _to 8 node "$CJS" --dir "$SPOOL" eval "1" >/dev/null 2>&1; then live=true; ev=true; fi
+  if [ "$live" = true ]; then
+    _to 10 node "$CJS" --dir "$SPOOL" evalasync "return 1" 5 >/dev/null 2>&1 && eva=true
+    _to 8 node "$CJS" --dir "$SPOOL" listtabs 2>/dev/null | grep -q '"tabId"' && tabid=true
+    local tmp="/tmp/chrome-agent-doctor-$$.png"
+    _to 12 node "$CJS" --dir "$SPOOL" screenshot "$tmp" 2>/dev/null | grep -q '"bytes"' && shot=true
+    rm -f "$tmp" 2>/dev/null
+  fi
+  printf '%s %s %s %s %s\n' "$live" "$ev" "$eva" "$tabid" "$shot"
+}
 doctor(){
-  local bin; bin="$(_fork_binary)"
+  local bin eng
+  bin="$(_fork_binary)"
+  eng="$(_engine_probe)"
   python3 -c 'import json,os,shutil,subprocess,sys
 fork,cjs,launch,binary,spool,profile,sites=sys.argv[1:8]
 def ok(p): return os.path.exists(p)
@@ -1035,8 +1054,27 @@ if not res["tools"]["cloudflared"]:
     res.setdefault("notes",[]).append("cloudflared absent — `share` (remote login, ADR 0003) will not work")
 if not res["tools"]["Xvfb"]:
     res.setdefault("notes",[]).append("Xvfb absent — headful login on a server needs it (macOS desktops do not)")
+eng=sys.argv[8].split()
+def b(i): return len(eng)>i and eng[i]=="true"
+res["engine"]={"running":b(0),"eval":b(1),"evalasync":b(2),"tabid":b(3),"screenshot_ack":b(4)}
+if not b(0):
+    res["engine"]["note"]="no browser is servicing the spool — run: chrome-agent up (capabilities unknown, not absent)"
+else:
+    # FATAL vs DEGRADED. Without evalasync or tabId nothing works and lanes collide, so the machine
+    # is not ready. A screenshot that never acks costs you `shot` and `learn` and nothing else —
+    # calling that "not ready" would train an operator to ignore the word.
+    fatal=[]; degraded=[]
+    if not b(2): fatal.append("evalasync -> every recipe and every probe (the CLI would hang or time out)")
+    if not b(3): fatal.append("tabId in listtabs -> per-session tab isolation; lanes would steer each other")
+    if not b(4): degraded.append("screenshot did not ack -> `shot` and `learn` cannot write a PNG; everything else works")
+    if fatal:
+        res["engine"]["too_old_for"]=fatal
+        res["ready"]=False
+        res["missing"]=res.get("missing",[])+["engine capabilities (fork predates this CLI)"]
+    if degraded:
+        res["engine"]["degraded"]=degraded
 print(json.dumps(res,indent=2))
-sys.exit(0 if res["ready"] else 3)' "$FORK" "$CJS" "$LAUNCH" "$bin" "$SPOOL" "$PROFILE" "$HOME/.config/chrome-agent/sites"
+sys.exit(0 if res["ready"] else 3)' "$FORK" "$CJS" "$LAUNCH" "$bin" "$SPOOL" "$PROFILE" "$HOME/.config/chrome-agent/sites" "$eng"
 }
 
 # ---- share: the time-boxed login window (ADR 0003) -------------------------------------------

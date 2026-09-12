@@ -250,6 +250,19 @@ bsky/mastodon/stackoverflow/dev.to/producthunt/medium/indiehackers/github. `quor
 signed-out profile and exactly what `auth` says about them. `facebook` reads empty for the same
 reason.
 
+### `doctor` asks the engine what it can do — and immediately caught something
+
+ADR 0006 says a CLI newer than its engine must not discover that as a hang. The spool protocol has
+no VERSION verb (that is a fork change, not a CLI one), so `doctor` asks the engine what it can
+actually DO, each question under its own timeout: eval, evalasync, tabId-in-listtabs, screenshot
+ack. Fatal (evalasync, tabId) flips `ready` to false; degraded does not — calling a lost screenshot
+"not ready" would train an operator to ignore the word.
+
+**It found a live one on the first run: SCREENSHOT never acks on the running fork.** The verb is
+consumed and the result file never appears (`timed out waiting for result …`), so `shot` and `learn`
+cannot write a PNG right now. This is the 2026-07-21 failure again, and `shot()` already refuses to
+report a path it cannot see — which is why it was invisible until something asked.
+
 ### The ledger rotates
 
 14.7 MB with no rotation — every read result stored verbatim. It rolls on size (8 MB default),
@@ -282,8 +295,11 @@ a copy is a second version of the CLI that ages silently.
   is a floor, not a ceiling: it cannot paginate, cannot read a thread, and returns a login wall as
   ~300 characters of nothing. Each file's `notes` names the endpoint a real recipe should replay.
 - **facebook.com stays red**, honestly: the profile is signed out and `auth` agrees.
-- **Cron/launchd still unproven**, and **the ledger still has no rotation** (now 14 MB, and now
-  worth keeping because it carries identity).
+- **Cron/launchd still unproven.**
+- **SCREENSHOT is broken on the live fork** (found by `doctor`, above). Nothing else depends on it,
+  but `learn`'s visual half is down until someone looks at the fork side.
+- **No protocol version.** `doctor`'s capability probe is the workaround; a real `VERSION` verb in
+  the fork is the fix, and it is a fork change.
 
 ---
 

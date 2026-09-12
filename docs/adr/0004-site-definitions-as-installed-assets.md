@@ -1,7 +1,11 @@
 # ADR 0004 — Site definitions are data, shipped with the skill and installed where they can be edited
 
-- **Status:** **PROPOSED.** The schema is drafted (`skills/chrome-agent/sites/SCHEMA.md`); no
-  loader, no installer, no site file has been converted yet.
+- **Status:** **BUILT AND PROVEN, 2026-09-12.** 19 site definitions ship; `scripts/sites.py` owns
+  the resolution order; `auth`/`login`/`logout`/`verify`/`read` all read them. All four proofs below
+  were executed, not asserted: an override dir changes the verdict (the stub probe is what runs),
+  `sites sync` leaves a locally edited file alone and names it, `--force` replaces it and the real
+  probe returns, and 12 of the definitions were written by agents that never touched the CLI or the
+  browser — 7 of those then ran live on the first try with no CLI change in between.
 - **Date:** 2026-09-12
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)

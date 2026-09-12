@@ -94,10 +94,9 @@ wait_for_url(){ local logf="$1" url
 # leaves the caller's process group, so Ctrl-C / a dying ssh session cannot
 # orphan a live tunnel. It calls back into THIS script's `stop`.
 #
-# TIMER_MARK is a grep handle in the timer's own command line. The recorded
-# timer_pid is only the wrapper we can see; a detached `sleep` can outlive a
-# TERM to it, and a stale timer from a PREVIOUS share would then kill the NEXT
-# one early. `stop` pkills on this marker so a cancelled share cancels its timer.
+# TIMER_MARK is a human label in the timer's command line so `ps`/`pgrep` can
+# show it. It is NOT how the timer is killed — see do_stop; killing by pattern
+# once took out an innocent shell that merely mentioned the string.
 TIMER_MARK="chrome-agent-share-timer"
 arm_timer(){ local secs="$1"
   # Two defences, both MEASURED on macOS 2026-09-12, neither guessed:
@@ -137,22 +136,35 @@ kill_pid(){ local p="${1:-}"; [ -n "$p" ] || return 0
   for _ in 1 2 3 4 5; do alive "$p" || return 0; sleep 0.3; done
   kill -KILL "$p" 2>/dev/null || true; return 0; }
 
-do_stop(){ local reason="${1:-manual}" ttl url
+do_stop(){ local reason="${1:-manual}" ttl url tp mypgid
   if [ ! -f "$STATE" ]; then echo '{"ok":true,"stopped":false,"note":"nothing running"}'; exit 0; fi
-  ttl="$(jget ttl || echo '')"; url="$(jget url || echo '')"
-  # reverse order of bring-up
-  kill_pid "$(jget timer_pid || true)"
+  ttl="$(jget ttl || echo '')"; url="$(jget url || echo '')"; tp="$(jget timer_pid || echo '')"
+  # reverse order of bring-up: the public thing first, the private thing last.
   kill_pid "$(jget cloudflared_pid || true)"
   kill_pid "$(jget client_pid || true)"
   kill_pid "$(jget vnc_pid || true)"
   kill_pid "$(jget xvfb_pid || true)"
   kill_pid "$(jget http_pid || true)"
-  # the detached timer's `sleep` child survives a TERM to its wrapper on some shells
-  pkill -f "$TIMER_MARK" 2>/dev/null || true
-  sleep 0.3; pkill -9 -f "$TIMER_MARK" 2>/dev/null || true
+  # State and ledger BEFORE the timer, deliberately: when the TIMER is the caller,
+  # the next step can end this very process, and a teardown that dies one line
+  # before `rm` leaves a state file claiming a share that no longer exists.
   rm -f "$STATE" "$TOKEN_FILE" "$VNCPASS_FILE"
   log "share-stop" "ttl=${ttl:-?} reason=$reason" "torn down: ${url:-no-url}"
   printf '{"ok":true,"stopped":true,"reason":"%s"}\n' "$reason"
+  # Cancel the timer by PROCESS GROUP, never by pattern: it is its own session
+  # leader, so pgid == recorded pid and `kill -- -PID` takes the wrapper and the
+  # `sleep` it is blocked on together. Two scars here, both from 2026-09-12:
+  #   * `pkill -f <marker>` killed an unrelated shell that merely MENTIONED the
+  #     marker on its command line. A teardown that can kill bystanders is not one.
+  #   * when the timer itself calls `stop`, that stop is IN the timer's group, so
+  #     the group kill was suicide — the share stayed up and nothing was logged.
+  #     Hence the pgid comparison below.
+  mypgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  if [ -n "$tp" ] && [ "$mypgid" != "$tp" ]; then
+    kill -TERM -- "-$tp" 2>/dev/null || true
+    sleep 0.3
+    kill -KILL -- "-$tp" 2>/dev/null || true
+  fi
   exit 0; }
 
 do_reconcile(){ local exp

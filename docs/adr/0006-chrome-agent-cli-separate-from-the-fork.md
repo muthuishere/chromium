@@ -1,6 +1,10 @@
 # ADR 0006 — A distributable `chrome-agent` CLI, separate from the fork it drives
 
-- **Status:** **PROPOSED — this is the one to argue about before building.**
+- **Status:** **PARTLY BUILT — the discussion is still open.** `doctor` exists and answers the
+  fork/build/tools/profile questions, and `install` puts the editable assets in `~/.config` with the
+  CLI symlinked onto PATH. The load-bearing piece is NOT built: there is no protocol version, so a
+  CLI newer than its engine still discovers that as a hang. Everything under "The discussion this
+  ADR exists for" remains unresolved and deliberately so.
 - **Date:** 2026-09-12
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)

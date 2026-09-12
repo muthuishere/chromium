@@ -1,8 +1,10 @@
 # ADR 0005 — Profile and session lifecycle are CLI verbs, and logout is one of them
 
-- **Status:** **PARTLY BUILT.** `profile create`, `login`, `auth`, `verify` and the exit-code
-  contract landed 2026-09-12 and are proven live. `profile list`, `profile delete` and `logout` are
-  proposed here and do not exist.
+- **Status:** **BUILT, 2026-09-12.** All six verbs exist. `logout` was tested on all three methods
+  (`url` against a real signed-out site; `dom` and `cookies` against a synthetic fixture, so no real
+  session was destroyed to prove it) and it verifies with `auth` afterwards. `profile delete`'s
+  guards fire — and building them found that BOTH lock checks used `-e` on a symlink whose target
+  never exists, so "is a browser running on this profile?" had never once been true.
 - **Date:** 2026-09-12
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)
