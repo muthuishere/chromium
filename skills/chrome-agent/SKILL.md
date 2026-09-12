@@ -146,6 +146,11 @@ chrome-agent linkedin like [post-url] [--confirm]  # self-verifying (aria-state 
 # identity — DOMAIN-SCOPED, because a profile is signed into SITES, not into "a thing":
 chrome-agent auth <domain>                 # read-only {signed_in, as?}; exit 0 = yes, 2 = no
 chrome-agent login <domain>                # opens the window there for a HUMAN; types NOTHING
+chrome-agent logout <domain>               # end THIS site's session; verifies with auth after
+chrome-agent sites list|show <d>|path <d>|validate|sync [--force]
+chrome-agent profile list | delete <dir> [--yes]
+chrome-agent doctor                        # can this machine run anything at all?
+chrome-agent share start|status|stop       # time-boxed remote login window (server, ADR 0003)
 chrome-agent verify <domain>               # run the site's real read verb; stamp playbook last_verified
 chrome-agent note <domain> "<learned>"     # capture site knowledge the moment you learn it
 chrome-agent promote [<domain>] [--apply] [--notes-only]   # learned -> canon, as a review
@@ -177,6 +182,55 @@ a live X session** in the profile; when logged out, `x like/repost` correctly re
 Any write recipe works via the general runner too:
 `chrome-agent recipe linkedin:comment '{"postUrl":"…","text":"…","confirm":true}'`,
 `chrome-agent recipe x:reply '{…}'`, `chrome-agent recipe reddit:post '{…}'`, etc.
+
+## Sites are DATA now, and a session can be put down (2026-09-12, ADRs 0004 + 0005)
+
+Every page-level fact about a site — login url, the signed-in probe, the logout route, which verb
+reads it, its traps — lives in **one JSON file per domain**, 19 of them today:
+
+```
+$CHROME_AGENT_SITES            explicit override (tests, CI)
+~/.config/chrome-agent/sites/  INSTALLED — editable, WINS      <- fix a re-skinned site here
+<skill>/sites/                 SHIPPED — the embedded asset
+```
+
+`chrome-agent sites sync` installs shipped → installed and refuses to clobber a file you edited
+(`--force` does, and says what it replaced). So a site that breaks at 2am on a server is a one-file
+fix with no redeploy. Schema and the rules a probe must obey: `sites/SCHEMA.md`.
+
+**Writing a probe — the three rules that cost real time here:**
+1. The session cookies that matter are **HttpOnly**. `document.cookie` cannot see `li_at` or
+   `auth_token`, so gating on them reports a live session as logged out.
+2. **A 200 is not a verdict.** reddit's `/api/v1/me.json` answers 200 with no `name` when signed
+   out; substack's `/api/v1/subscriptions` answers a perfectly valid JSON 401.
+3. **Fail closed.** An earlier LinkedIn probe returned `signed_in:true` from its `catch`, so a
+   network blip read as green — on the one site where a false green already cost 44 hours.
+
+`status: "unverified"` means the definition is a hypothesis written from documentation, and `auth`
+says so in its own output. All 19 probes have been run live; two proved their signed-IN path.
+
+**Lifecycle** (ADR 0005): `login` / `auth` / `logout` are **domain-scoped** — a profile is signed
+into many sites, so one boolean for the whole profile is a lie the moment one cookie expires.
+`logout` takes its method from the site file and **verifies with `auth` afterwards**; the `cookies`
+method warns in its own output that the site was never told, so the server-side session outlives it.
+`profile delete` refuses a running profile, refuses the default without `--force`, and names what it
+destroys before asking — it is the only revocation we have.
+
+## Running on a server (ADR 0003)
+
+`chrome-agent up --headless` is how a server runs: no window, no Mach bootstrap to fail, same spool
+/ tabId / eval / screenshot protocol. `doctor` answers every question whose wrong answer is a hang.
+
+**A human still has to log in, and that is the whole problem.** `login` under headless refuses and
+points at `share` rather than opening a window nobody can see. The share is a virtual display plus a
+localhost-only VNC behind a Cloudflare tunnel, with a mandatory TTL and a teardown — a login window
+with a lock on it, never a remote-control feature. Read ADR 0003 before touching it; the rules in it
+come from a real incident.
+
+**Do not carry a macOS profile to Linux.** Both platforms tag cookie ciphertext `v10` with different
+keys, so Linux silently drops every session cookie — history and Local Storage survive, the
+credential does not, and nothing reports an error. `skills/chrome-agent/docs/server-ubuntu.md` has
+the citations and the install path.
 
 ## Learned -> canon, and what `verify` actually proves (2026-09-12)
 

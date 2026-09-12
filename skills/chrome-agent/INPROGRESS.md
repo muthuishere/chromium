@@ -177,18 +177,87 @@ facebook is the one honest red: `auth facebook.com` agrees, and no probe should 
 
 ---
 
+## Third pass 2026-09-12 — off this machine: ADRs, site assets, lifecycle
+
+Four ADRs were written **before** the code, because these are decisions:
+`docs/adr/0003-chrome-agent-on-a-server.md` (headless + a time-boxed login share),
+`0004-site-definitions-as-installed-assets.md`, `0005-profile-and-session-lifecycle.md`,
+`0006-chrome-agent-cli-separate-from-the-fork.md` (the CLI/engine split — the one still open for
+argument).
+
+### Sites are data — 19 definitions, one file each
+
+`sites/<domain>.json` holds login url, the signed-in probe, the logout route, the read verb and the
+traps. `scripts/sites.py` owns the resolution order: `$CHROME_AGENT_SITES` → `~/.config/chrome-agent/
+sites/` (**installed, editable, wins**) → shipped. A re-skinned site is now a one-file fix on the
+server with no redeploy — proven by pointing an override dir at a different probe and watching the
+verdict change.
+
+Six agent teams ran in parallel to produce them: one converting the seven proven domains out of the
+CLI, three researching new ones, two spiking the server and the share.
+
+**All 19 probes were then run live in the fork. Every one returned a real verdict; none threw.**
+`medium.com` and `indiehackers.com` proved their signed-IN path and are `verified`; the rest proved
+only the signed-OUT path and say so in `probe_checked`. `auth` now labels an unverified definition
+in its own output, so a hypothesis cannot read like proof.
+
+Two probe bugs came out of review, both fixed in the file and the fallback:
+
+- **LinkedIn failed OPEN.** Its `catch` returned `signed_in: true`, so a network blip, a CSP refusal
+  or a stale JSESSIONID on a logged-out page all reported green — on the one site where a false
+  green already cost 44 hours of silent non-posting.
+- **X gated on `ct0`**, which is set during the login *flow*, before authentication completes. It
+  now waits for the profile link and reports `inconclusive` instead of guessing.
+
+### `logout`, and the lock check that had never fired
+
+`logout <domain>` takes `url | dom | cookies` from the site file and **verifies with `auth`
+afterwards**. `cookies` warns in its own output that the site was never told, so the server-side
+session outlives it — "we cleared local cookies" and "the site ended your session" are different
+facts and only one is a revocation. All three branches tested, the DOM and cookie ones against a
+synthetic fixture so no real session was destroyed to prove it.
+
+`profile list` / `profile delete` landed with real guards — and found a dead one: **both lock checks
+used `-e` on a SYMLINK whose target never exists**, so "is a browser running on this profile?" had
+never once been true. `-L` fixed it; `profile delete` now correctly refuses a live profile.
+
+### ADR 0003 §4 was wrong before anything was built on it
+
+The spike read this fork's own source and killed the profile-carry escape hatch: macOS and Linux
+**both tag cookie ciphertext `v10`** (`keychain_key_provider.mm:28-66` vs
+`posix_key_provider.cc:17-23`), so Linux decrypts the Mac's cookies with the constant `peanuts`,
+padding fails, and the rows are skipped as `kDecryptFailed` — **with no error surfaced anywhere.**
+History and Local Storage survive; every session cookie does not. Carrying is Linux→Linux only, the
+tarball is then a plaintext credential, and `auth` per site on arrival is mandatory. The ADR carries
+the correction with citations rather than a quiet edit.
+
+### Also
+
+`up --headless`; `login` refuses under headless and points at `share`; `doctor` answers every
+question whose wrong answer is a hang (fork present, built, spool, tools, sites dir); the playbook
+generator now emits a playbook for a site that has a definition but no recipe, so all 19 have one.
+
+---
+
 ## Still open
 
-- **facebook.com and instagram.com remain read-only, youtube too.** Their `write.md` says so. Adding
-  a write means adding a recipe, not driving the DOM from a lane.
-- **Cron/launchd is unproven** (see P3.1). Run the headless path from an actual launchd job before
-  anything depends on it.
-- **The drift review queue is unstructured.** `promote` can only offer a drift line verbatim; there
-  is no way to edit one into a trap without hand-writing it. Fine for three entries, not for thirty.
-- **`auth` covers eight domains.** Anything else exits 1 rather than guessing — deliberate, but the
-  table has to grow with the playbooks.
-- **The ledger is 14 MB and has no rotation.** It now carries identity, which makes it worth keeping
-  and therefore worth rotating.
+- **Nothing here has run on Ubuntu.** `scripts/server-install.sh` and `docs/server-ubuntu.md` exist
+  and are statically clean; the fork has never been built or started on Linux from this repo. Until
+  it is, ADR 0003 is macOS-only in fact and Linux-only in intent.
+- **The share is the next thing to prove.** Tunnel-up, login-through, tunnel-down, nothing left
+  listening — checked from off-box.
+- **17 of 19 site definitions have an unproven signed-IN path.** They need a human session, once,
+  per site. `probe_checked` records exactly which half is proven.
+- **`discord.com` probably does not belong.** Its API authenticates on a header, not cookies, so the
+  one thing this fork is good at — replaying a site's own API with the human's session — is
+  unavailable; what is left is hashed-class DOM scraping. Keep it probe-only or drop it.
+- **`write` is empty for all 12 new sites.** No publish path was justified without driving the
+  browser, which was correctly off-limits to the research agents.
+- **No read recipes for the new sites** — `read.verb` is `eval` plus a fixture page. Each file's
+  `notes` names the endpoint a recipe should replay; that is the next unit of work.
+- **facebook.com stays red**, honestly: the profile is signed out and `auth` agrees.
+- **Cron/launchd still unproven**, and **the ledger still has no rotation** (now 14 MB, and now
+  worth keeping because it carries identity).
 
 ---
 

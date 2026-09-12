@@ -1001,6 +1001,31 @@ share(){ local sh="$SKILL/scripts/share.sh"
   [ -x "$sh" ] || [ -f "$sh" ] || die "$EX_USAGE" "not-installed" "scripts/share.sh is not present in this install"
   bash "$sh" "$@"; }
 
+# ---- install (ADR 0004 + 0006) ---------------------------------------------------------------
+# One command that makes this machine ready, and puts the editable half where it can be edited:
+#   ~/.config/chrome-agent/sites/    the site definitions — THE place to fix a re-skinned page
+#   ~/.config/chrome-agent/learned/  notes waiting to be promoted into canon
+#   ~/.local/bin/chrome-agent        the CLI on PATH
+# It is idempotent, it never overwrites a site file you edited (that needs `sites sync --force`),
+# and it ends by running doctor, because "installed" and "able to run" are different claims.
+install_(){ local bindir="${1:-$HOME/.local/bin}"
+  mkdir -p "$HOME/.config/chrome-agent/sites" "$HOME/.config/chrome-agent/learned" \
+           "$HOME/.config/chrome-agent/share" "$bindir"
+  python3 "$SITES_PY" sync >/dev/null
+  # A symlink, not a copy: a copy is a second version of the CLI that ages silently.
+  if [ ! -e "$bindir/chrome-agent" ] || [ -L "$bindir/chrome-agent" ]; then
+    ln -sf "$CA_SELF" "$bindir/chrome-agent"
+  fi
+  python3 -c 'import json,os,sys
+sites=sys.argv[2]
+print(json.dumps({"cli":sys.argv[1],"on_path":os.path.join(sys.argv[3],"chrome-agent"),
+  "sites_installed":sites,
+  "edit_here":"a page changed? edit %s/<domain>.json — it wins over the shipped copy, no redeploy" % sites,
+  "learned":sys.argv[4],
+  "next":["chrome-agent doctor","chrome-agent sites list","chrome-agent auth <domain>"]},indent=2))' \
+    "$CA_SELF" "$HOME/.config/chrome-agent/sites" "$bindir" "$HOME/.config/chrome-agent/learned"
+}
+
 # ---- verify <domain> — make `last_verified` mean something (2026-09-12) ----------------------
 # The playbooks' `last_verified` was stamped at GENERATION time, which proves only that someone ran
 # a generator. It said nothing about whether the site still answers, so a playbook could age into
@@ -1138,6 +1163,7 @@ It RUNS browser-research's verified recipes through the fork — no per-site rei
   profile create <dir> | list | delete <dir> [--yes]
   sites list | show <domain> | path <domain> | validate | sync [--force]
   doctor                          is this machine able to run anything at all?
+  install [bindir]                sites -> ~/.config/chrome-agent/sites (editable), CLI -> PATH
   share start|status|stop         time-boxed remote login window on a server (ADR 0003)
   profile | spool                 which profile/spool this invocation resolves to
   exit-codes [--json]             0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused
@@ -1167,6 +1193,7 @@ case "${1:-}" in
       *) die "$EX_USAGE" "usage" "profile [create <dir> | list | delete <dir> [--yes]]";; esac;;
   auth) auth "${2:-}";; login) login "${2:-}";; logout) logout "${2:-}";; verify) verify "${2:-}";;
   doctor) doctor;;
+  install) install_ "${2:-}";;
   share) shift; share "$@";;
   sites) shift; case "${1:-list}" in
       list) python3 "$SITES_PY" list "${2:-}";;
