@@ -10,3 +10,6 @@ been bitten and written it down — not that this site is honest.
 
 **Verification rule:** read the artifact back from the live page. A 2xx proves nothing
 here, and on some of these sites neither does a 5xx.
+
+<!-- keep: hand-written below — the generator never touches this -->
+

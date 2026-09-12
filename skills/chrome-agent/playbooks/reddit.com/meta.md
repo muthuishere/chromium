@@ -2,7 +2,7 @@
 domain: reddit.com
 aliases: reddit, subreddit, r/
 staged: true
-last_verified: never (run: chrome-agent verify reddit.com)
+last_verified: 2026-09-12 (recipe:reddit:listing)
 source: generated from `chrome-agent recipes --json`
 ---
 

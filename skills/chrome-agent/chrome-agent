@@ -691,34 +691,139 @@ exit_codes(){
   fi
 }
 
+# ---- LEARNED -> CANON (2026-09-12) -----------------------------------------------------------
+# `note` captures a thing you learned about a site the moment you learn it; `promote` shows what is
+# known but not written down, and appends it into the playbook's kept block. See scripts/promote.py
+# for why this exists (ADR-0008 requires review and shipped no tooling for it).
+LEARNED_DIR="$HOME/.config/chrome-agent/learned"
+note(){ local domain; domain="$(_domain_norm "${1:-}")"; local text="${2:-}"
+  [ -n "$domain" ] && [ -n "$text" ] || die "$EX_USAGE" "usage" "note <domain> \"<what you learned>\""
+  mkdir -p "$LEARNED_DIR"
+  python3 -c 'import json,sys,datetime
+rec={"ts":datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),"domain":sys.argv[1],
+     "text":sys.argv[2],"promoted":False}
+open(sys.argv[3],"a").write(json.dumps(rec,separators=(",",":"))+"\n")
+print(json.dumps({"noted":rec["domain"],"text":rec["text"],"promote_with":"chrome-agent promote "+rec["domain"]},separators=(",",":")))' \
+    "$domain" "$text" "$LEARNED_DIR/$domain.ndjson"; }
+promote(){ local domain="" flags=""
+  for a in "$@"; do case "$a" in
+    --*) flags="$flags $a" ;;
+    ?*)  [ -z "$domain" ] && domain="$(_domain_norm "$a")" ;;
+  esac; done
+  python3 "$SKILL/scripts/promote.py" ${domain:+"$domain"} $flags; }
+
+# ---- Hacker News READ (2026-09-12) -----------------------------------------------------------
+# HN could post and comment and could not read a single thing back — while its own traps file says
+# "HN serves HTTP 200 on a dead or flagged post, open the item and read it back". The rule demanded
+# a verb the site did not have. These two are CLI-side DOM reads (HN has no API worth replaying and
+# no CSP to fight) and they report the two states a 200 hides: [flagged] and [dead].
+hn_item(){ # $1 = item url or bare id
+  local id="${1:-}" url
+  [ -n "$id" ] || die "$EX_USAGE" "usage" "hackernews item <url-or-id>"
+  case "$id" in
+    http*) url="$id" ;;
+    *[!0-9]*) die "$EX_USAGE" "usage" "hackernews item <url-or-id> — got '$id'" ;;
+    *) url="https://news.ycombinator.com/item?id=$id" ;;
+  esac
+  goto "$url" 4
+  local res; res=$(evalwithcsp '
+const q=(s,r)=>(r||document).querySelector(s);
+const title=q(".titleline a")?q(".titleline a").textContent.trim():(q(".title")?q(".title").textContent.trim():null);
+const sub=q(".subtext")?q(".subtext").textContent.trim():"";
+const head=document.body.innerText.slice(0,400);
+// A dead or flagged item still answers 200; the only evidence is in the page text.
+const flagged=/\[flagged\]/i.test(head), dead=/\[dead\]/i.test(head);
+const comments=[...document.querySelectorAll("tr.comtr")].map(tr=>{
+  const ind=tr.querySelector("td.ind img");
+  const body=tr.querySelector(".commtext");
+  return {
+    depth: ind?Math.round(parseInt(ind.getAttribute("width")||"0",10)/40):0,
+    author: tr.querySelector(".hnuser")?tr.querySelector(".hnuser").textContent.trim():null,
+    age: tr.querySelector(".age")?tr.querySelector(".age").textContent.trim():null,
+    dead: !!tr.querySelector(".comhead .dead") || (body?/^\s*\[(dead|flagged)\]/i.test(body.innerText):false),
+    text: body?body.innerText.trim().slice(0,2000):null,
+  };
+});
+const pts=sub.match(/(\d+)\s+points?/);
+return {site:"hackernews",recipe:"item",url:location.href,capturedAt:new Date().toISOString(),
+        title,points:pts?parseInt(pts[1],10):null,flagged,dead,
+        commentCount:comments.length,comments};' 20)
+  echo "$res"; log "hackernews:item" "$url" "$res"
+}
+hn_top(){ # $1=count (default 30)
+  local n="${1:-30}"
+  case "$n" in ''|*[!0-9]*) n=30 ;; esac   # this value is interpolated into page JS — digits only
+  goto "https://news.ycombinator.com/" 4
+  local res; res=$(evalwithcsp "
+const rows=[...document.querySelectorAll('tr.athing.submission')].slice(0,$n).map(tr=>{
+  const a=tr.querySelector('.titleline a');
+  const sub=tr.nextElementSibling;
+  const txt=sub?sub.innerText:'';
+  const pts=txt.match(/(\\d+)\\s+points?/), cmt=txt.match(/(\\d+)\\s+comments?/);
+  return {id:tr.id,title:a?a.textContent.trim():null,url:a?a.href:null,
+          by:sub&&sub.querySelector('.hnuser')?sub.querySelector('.hnuser').textContent.trim():null,
+          points:pts?parseInt(pts[1],10):null,comments:cmt?parseInt(cmt[1],10):0,
+          item:'https://news.ycombinator.com/item?id='+tr.id};
+});
+return {site:'hackernews',recipe:'top',url:location.href,capturedAt:new Date().toISOString(),
+        postCount:rows.length,posts:rows};" 20)
+  echo "$res"; log "hackernews:top" "front-page" "$res"
+}
+
 # ---- verify <domain> — make `last_verified` mean something (2026-09-12) ----------------------
 # The playbooks' `last_verified` was stamped at GENERATION time, which proves only that someone ran
 # a generator. It said nothing about whether the site still answers, so a playbook could age into
 # fiction while displaying a fresh-looking date. This runs the site's real read recipe (or, where a
 # site has none, its auth probe), stamps the date ONLY on success, and fails loudly otherwise.
 PLAYBOOKS="$SKILL/playbooks"
-_read_recipe_for(){ # $1=domain -> the first registered READ recipe that drives it
+# THE VERIFY FIXTURE — a read verb needs the right PAGE, not just the right origin.
+# Every remaining "0 items" was this: youtube:channel-videos scrapes THE CURRENT PAGE, so the
+# homepage yields nothing and the site looked broken; instagram:post wants an open post, not a
+# profile root. So each domain names the verb to run and the page to run it on. A domain with no
+# fixture falls back to the first registered read and the site root.
+_verify_fixture(){ case "$1" in
+  youtube.com)          echo 'youtube:channel-videos|https://www.youtube.com/results?search_query=chromium' ;;
+  instagram.com)        echo 'instagram:profile|https://www.instagram.com/instagram/' ;;
+  news.ycombinator.com) echo 'hackernews:top|https://news.ycombinator.com/' ;;
+  *) echo '' ;;
+esac; }
+
+# _verify_plan <domain> -> "key<TAB>cli<TAB>url"; cli is empty for a registry recipe.
+_verify_plan(){ local domain="$1" fx key url
+  fx="$(_verify_fixture "$domain")"; key="${fx%%|*}"; url="${fx#*|}"
+  [ -n "$fx" ] || { key=""; url="https://$domain/"; }
   node "$SKILL/recipes-list.mjs" --json 2>/dev/null | python3 -c 'import json,sys
 DOMAIN={"linkedin":"linkedin.com","x":"x.com","facebook":"facebook.com","instagram":"instagram.com",
         "reddit":"reddit.com","youtube":"youtube.com","hackernews":"news.ycombinator.com"}
-want=sys.argv[1]
-for r in json.load(sys.stdin):
-    if not r["write"] and r["source"]=="registry" and DOMAIN.get(r["site"])==want:
-        print(r["key"]); break' "$1"; }
+want,pin,url=sys.argv[1],sys.argv[2],sys.argv[3]
+rs=[r for r in json.load(sys.stdin) if not r["write"] and DOMAIN.get(r["site"])==want]
+r=next((x for x in rs if x["key"]==pin), None) if pin else None
+if r is None:
+    rs.sort(key=lambda x: 0 if x["source"]=="registry" else 1)
+    r=rs[0] if rs else None
+if r is None: print("\t\t"+url)
+else:
+    # The cli string is a usage template: drop its placeholders ([n], <url>) so what is left is a
+    # runnable command. A literal "[n]" once reached the page as JS and threw ReferenceError: n.
+    cli="" if r["source"]=="registry" else " ".join(
+        w for w in r["cli"].split() if not (w[:1] in "[<" and w[-1:] in "]>"))
+    print("%s\t%s\t%s" % (r["key"], cli, url))' "$domain" "$key" "$url"; }
 
 verify(){ local domain; domain="$(_domain_norm "${1:-}")"
   [ -n "$domain" ] || die "$EX_USAGE" "usage" "verify <domain> — e.g. chrome-agent verify linkedin.com"
   cj eval "1" >/dev/null 2>&1 || die "$EX_BROWSER" "browser-down" "no browser is servicing $SPOOL — run: chrome-agent up"
-  local key res how ok=false detail=""
-  key="$(_read_recipe_for "$domain")"
+  local plan key cli url res how ok=false detail=""
+  plan="$(_verify_plan "$domain")"
+  key="$(printf '%s' "$plan" | cut -f1)"; cli="$(printf '%s' "$plan" | cut -f2)"; url="$(printf '%s' "$plan" | cut -f3)"
   if [ -n "$key" ]; then
     how="recipe:$key"
-    # PUT THE TAB ON THE SITE FIRST. _ensure_origin only navigates for the four sites it knows,
+    # PUT THE TAB ON THE PAGE FIRST. _ensure_origin only navigates for the four sites it knows,
     # so `verify instagram.com` ran instagram:post against whatever page the tab happened to be on
     # — it scraped REDDIT, found images, and stamped instagram as verified (2026-09-12). A probe
     # that can pass while pointed at the wrong site proves nothing at all.
-    goto "https://$domain/" 6
-    res="$(recipe "$key")"
+    goto "$url" 6
+    # A chrome-agent verb is not a registry recipe — run it through this CLI, not through recipe().
+    if [ -n "$cli" ]; then res="$($CA_SELF ${cli#chrome-agent } 2>/dev/null)"; else res="$(recipe "$key")"; fi
     # Three ways this fails, and all three used to read as success: an error, a result whose own
     # `url` is not this domain, and a read that came back EMPTY (a logged-out facebook feed returns
     # postCount:0 with no error — "the verb ran" is not "the verb works").
@@ -780,12 +885,15 @@ It RUNS browser-research's verified recipes through the fork — no per-site rei
   linkedin post-image "<text>" <img> [--confirm]
   linkedin feed
   x post "<text>" [--confirm]
+  hackernews top [n] | hackernews item <url-or-id>   read HN back (reports [flagged]/[dead])
   watch <video-url>               YouTube/IG/X video -> mp3 -> transcript.md
 
   IDENTITY (domain-scoped — a profile is signed into SITES, not into "a thing"):
   auth <domain>                   read-only: {signed_in, as?}   exit 0 = yes, 2 = no
   login <domain>                  open the window there for a HUMAN; types nothing
   verify <domain>                 run the site's real read recipe; stamp playbook last_verified
+  note <domain> "<learned>"       capture site knowledge the moment you learn it
+  promote [<domain>] [--apply] [--notes-only]   review what is known but not in the playbook
   profile create <dir>            make a profile, do not launch
   profile | spool                 which profile/spool this invocation resolves to
   exit-codes [--json]             0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused
@@ -824,6 +932,12 @@ case "${1:-}" in
       reply) recipe "x:reply" "${2:-}";; *) usage;; esac;;
   reddit) shift; case "${1:-}" in
       upvote) reddit_upvote "${2:-}" "${3:-}";; comment) recipe "reddit:comment" "${2:-}";; post) recipe "reddit:post" "${2:-}";;
+      *) usage;; esac;;
+  note) note "${2:-}" "${3:-}";;
+  promote) shift; promote "$@";;
+  hackernews|hn) shift; case "${1:-}" in
+      item|thread) hn_item "${2:-}";; top|front) hn_top "${2:-30}";;
+      post) recipe "hackernews:post" "${2:-}";; comment) recipe "hackernews:comment" "${2:-}";;
       *) usage;; esac;;
   watch) watch "$2";;
   # tab primitives (pass-through to the fork). The skill gives EACH session its own dedicated

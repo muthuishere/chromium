@@ -147,6 +147,8 @@ chrome-agent linkedin like [post-url] [--confirm]  # self-verifying (aria-state 
 chrome-agent auth <domain>                 # read-only {signed_in, as?}; exit 0 = yes, 2 = no
 chrome-agent login <domain>                # opens the window there for a HUMAN; types NOTHING
 chrome-agent verify <domain>               # run the site's real read verb; stamp playbook last_verified
+chrome-agent note <domain> "<learned>"     # capture site knowledge the moment you learn it
+chrome-agent promote [<domain>] [--apply] [--notes-only]   # learned -> canon, as a review
 chrome-agent profile create <dir>          # make a profile, do not launch
 chrome-agent profile | spool               # which profile/spool this invocation resolves to
 chrome-agent exit-codes [--json]           # the exit-code contract
@@ -161,6 +163,8 @@ chrome-agent linkedin post-image "<text>" <img> [--confirm]
 chrome-agent linkedin feed
 chrome-agent x post "<text>" [--confirm] | x like <url> | x repost <url> | x reply <opts-json>
 chrome-agent reddit upvote <url> [--confirm] | reddit comment <opts> | reddit post <opts>
+chrome-agent hackernews top [n]            # front page: title, points, comments, item link
+chrome-agent hackernews item <url-or-id>   # read a thread BACK — comments with depth, [flagged]/[dead]
 chrome-agent watch <video-url>             # YouTube/IG/X video -> mp3 -> transcript.md
 ```
 
@@ -173,6 +177,29 @@ a live X session** in the profile; when logged out, `x like/repost` correctly re
 Any write recipe works via the general runner too:
 `chrome-agent recipe linkedin:comment '{"postUrl":"…","text":"…","confirm":true}'`,
 `chrome-agent recipe x:reply '{…}'`, `chrome-agent recipe reddit:post '{…}'`, etc.
+
+## Learned -> canon, and what `verify` actually proves (2026-09-12)
+
+```
+chrome-agent note <domain> "<what you learned>"     # the moment you learn it
+chrome-agent promote [<domain>] [--notes-only]      # what is known but not written down
+chrome-agent promote <domain> --notes-only --apply  # append it into the playbook
+```
+
+Promotion only ever **appends below the keep-marker** in `playbooks/<domain>/traps.md` — the one
+block `gen_playbooks.py` will not touch — so a promoted trap survives the next regeneration, and
+promoting twice is a no-op instead of a second copy. Drift entries are offered but **not** promoted
+by default: a drift line is a failure report, not yet a trap ("post-url required" is a usage
+mistake, not something the site lies about). That is why `--notes-only` exists.
+
+`verify <domain>` runs the site's real read verb from a per-site **fixture page** and stamps
+`last_verified` only on success. It rejects three things that used to read as success: an error, a
+result whose own `url` is not that domain, and an empty read. The fixture matters as much as the
+verb — these scrapers read THE CURRENT PAGE, so `youtube:channel-videos` on the homepage returns 0
+and looks like drift; it verifies from a results page.
+
+**`verify` is not `auth`.** YouTube verifies green while signed out, because its read verb works
+logged out. "The verb still works" and "we are still someone" are different questions.
 
 ## Where the browser lives, and what an exit code means (2026-09-12)
 

@@ -54,6 +54,8 @@ TRAPS = {
         "**HN serves HTTP 200 on a dead or flagged post.** The status code is not evidence. Open the\n  item and read it back as a logged-out visitor would see it.",
     ],
 }
+# Everything after this line in traps.md is hand-written and survives regeneration.
+KEEP = "<!-- keep: hand-written below — the generator never touches this -->\n"
 SHARED_TRAP = ("**One shared browser, no mutex.** Two lanes attach to a nondeterministic tab.\n"
                "  `chrome-agent goto <url>` then `chrome-agent status` before believing any read.")
 
@@ -157,14 +159,38 @@ def main():
               "**What to do:** stop and name the profile that needs a human.\n\n"
               "```\napl accounts --check\n```\n\nDo not retry in a loop meanwhile.\n" % domain)
 
+        # TRAPS: the generator owns everything ABOVE the keep-marker and nothing below it.
+        # Only the verb surface has a source of truth, so traps stay hand-written -- which used to
+        # mean a trap typed straight into this file was silently destroyed by the next run. The
+        # marker makes that block durable, and `chrome-agent promote` appends into it.
         traps = TRAPS.get(domain, [])
         tl = "".join("- %s\n" % t for t in traps + [SHARED_TRAP])
         note = "" if traps else ("\nNo site-specific trap has been recorded yet. That means nobody has\n"
                                  "been bitten and written it down — not that this site is honest.\n")
-        write(os.path.join(d, "traps.md"),
+        tpath = os.path.join(d, "traps.md")
+        kept = ""
+        if os.path.exists(tpath):
+            prev = open(tpath).read()
+            if KEEP in prev:
+                kept = prev.split(KEEP, 1)[1]
+            else:
+                # A pre-marker traps.md may hold hand-written text. Keep only the lines this
+                # generator would not have written -- copying the whole file back would duplicate
+                # the generated half, and dropping it would lose the part that cost someone time.
+                mine = set(l.strip() for l in (tl + note).splitlines() if l.strip())
+                extra = [l for l in prev.splitlines()
+                         if l.strip() and l.strip() not in mine
+                         and not l.startswith(("# ", "**Verification rule:**"))
+                         and "cost someone real time" not in l
+                         and "proves nothing" not in l and "neither does a 5xx" not in l]
+                if extra:
+                    kept = ("\n## Carried over from a pre-marker traps.md — fold these in or delete\n\n"
+                            + "\n".join(extra) + "\n")
+        write(tpath,
               "# %s — traps\n\nWhat this site lies about. Each entry cost someone real time.\n\n%s%s\n"
               "**Verification rule:** read the artifact back from the live page. A 2xx proves nothing\n"
-              "here, and on some of these sites neither does a 5xx.\n" % (domain, tl, note))
+              "here, and on some of these sites neither does a 5xx.\n\n%s%s"
+              % (domain, tl, note, KEEP, kept or "\n"))
 
         print("%-22s %d read, %d write" % (domain, len(reads), len(writes)))
 

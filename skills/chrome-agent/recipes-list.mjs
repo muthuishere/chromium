@@ -30,10 +30,14 @@ const REGISTRY =
 // the bash CLI, each self-verifying by an attribute flip (aria-label / data-testid / aria-pressed)
 // and staged until --confirm, exactly like a registry write.
 const BUILTIN = [
-  ['linkedin:like',   'like the post at <url> (or the first feed post) — verified by the reaction button flipping state', 'chrome-agent linkedin like <url> --confirm'],
-  ['x:like',          'like the tweet at <url> — verified by data-testid flipping like -> unlike',                        'chrome-agent x like <url> --confirm'],
-  ['x:repost',        'repost the tweet at <url> — verified by data-testid flipping retweet -> unretweet',                'chrome-agent x repost <url> --confirm'],
-  ['reddit:upvote',   'upvote the post at <url> — verified by aria-pressed becoming true',                                'chrome-agent reddit upvote <url> --confirm'],
+  // [key, describe, cli, write]
+  ['linkedin:like',   'like the post at <url> (or the first feed post) — verified by the reaction button flipping state', 'chrome-agent linkedin like <url> --confirm', true],
+  ['x:like',          'like the tweet at <url> — verified by data-testid flipping like -> unlike',                        'chrome-agent x like <url> --confirm', true],
+  ['x:repost',        'repost the tweet at <url> — verified by data-testid flipping retweet -> unretweet',                'chrome-agent x repost <url> --confirm', true],
+  ['reddit:upvote',   'upvote the post at <url> — verified by aria-pressed becoming true',                                'chrome-agent reddit upvote <url> --confirm', true],
+  // HN could write and not read, while its own traps file says "open the item and read it back".
+  ['hackernews:top',  'read the HN front page: title, points, comments, item link',                                       'chrome-agent hackernews top [n]', false],
+  ['hackernews:item', 'read a thread back by url or id — comments with depth, and the [flagged]/[dead] a 200 hides',      'chrome-agent hackernews item <url-or-id>', false],
 ];
 
 async function load() {
@@ -62,9 +66,9 @@ async function load() {
       cli: `chrome-agent recipe ${key}`,
     });
   }
-  for (const [key, describe, cli] of BUILTIN) {
+  for (const [key, describe, cli, write] of BUILTIN) {
     const [site, verb] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
-    out.push({ key, site, verb, describe, write: true, world: 'main', source: 'chrome-agent', cli });
+    out.push({ key, site, verb, describe, write, world: 'main', source: 'chrome-agent', cli });
   }
   out.sort((a, b) => a.key.localeCompare(b.key));
   return out;

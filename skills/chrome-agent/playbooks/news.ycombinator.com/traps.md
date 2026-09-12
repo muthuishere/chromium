@@ -9,3 +9,6 @@ What this site lies about. Each entry cost someone real time.
 
 **Verification rule:** read the artifact back from the live page. A 2xx proves nothing
 here, and on some of these sites neither does a 5xx.
+
+<!-- keep: hand-written below — the generator never touches this -->
+- A dead or flagged item still answers 200 and renders — the only evidence is the page text: `[flagged]` / `[dead]`. `chrome-agent hackernews item <id>` reports both, which is what the verification rule here always demanded.  _(promoted 2026-09-12, from note)_

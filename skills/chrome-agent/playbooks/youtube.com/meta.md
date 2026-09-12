@@ -2,7 +2,7 @@
 domain: youtube.com
 aliases: youtube, yt, video, channel
 staged: true
-last_verified: never (run: chrome-agent verify youtube.com)
+last_verified: 2026-09-12 (recipe:youtube:channel-videos)
 source: generated from `chrome-agent recipes --json`
 ---
 

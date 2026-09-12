@@ -13,3 +13,6 @@ What this site lies about. Each entry cost someone real time.
 
 **Verification rule:** read the artifact back from the live page. A 2xx proves nothing
 here, and on some of these sites neither does a 5xx.
+
+<!-- keep: hand-written below — the generator never touches this -->
+- `li_at` is HttpOnly, so `document.cookie` can never see it — gating a signed-in check on it calls a perfectly live session logged out. Ask `/voyager/api/me` with the JSESSIONID csrf token and let the browser attach the cookie.  _(promoted 2026-09-12, from note)_

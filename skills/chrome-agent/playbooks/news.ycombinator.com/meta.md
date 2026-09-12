@@ -2,7 +2,7 @@
 domain: news.ycombinator.com
 aliases: hacker news, hackernews, hn, ycombinator
 staged: true
-last_verified: 2026-09-12 (auth)
+last_verified: 2026-09-12 (recipe:hackernews:top)
 source: generated from `chrome-agent recipes --json`
 ---
 

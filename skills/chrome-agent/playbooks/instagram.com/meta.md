@@ -2,7 +2,7 @@
 domain: instagram.com
 aliases: instagram, ig, insta, reel
 staged: true
-last_verified: never (run: chrome-agent verify instagram.com)
+last_verified: 2026-09-12 (recipe:instagram:profile)
 source: generated from `chrome-agent recipes --json`
 ---
 

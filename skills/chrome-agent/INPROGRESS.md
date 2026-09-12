@@ -81,19 +81,9 @@ and reported instagram verified. `facebook:feed` returned `postCount: 0` with no
 too. So verify now navigates to the domain first, rejects a result whose own `url` is not that
 domain, and rejects an empty read: "the verb ran" is not "the verb works".
 
-Honest state after that fix:
-
-| site | verified | by |
-|---|---|---|
-| linkedin.com | yes | `recipe:linkedin:feed` |
-| x.com | yes | `recipe:x:timeline` |
-| news.ycombinator.com | yes | `auth` (no read recipe exists) |
-| reddit.com | **no** | `reddit:listing` → `TypeError: Failed to fetch` |
-| facebook.com | **no** | feed read returns 0 items (signed out, or drift) |
-| instagram.com | **no** | read returns 0 items |
-| youtube.com | **no** | `youtube:channel-videos` returns 0 from the homepage — it likely wants a channel in `opts`, which `verify` has no way to supply yet |
-
-Four `never` stamps is the verb working. Three of those four previously read as a fresh green date.
+Four sites went straight back to `never` after that — three of which had been reading as a fresh
+green date. The second pass then found that three of those four `never`s were the *probe's* fault,
+not the site's; see **`verify` fixtures** below for the state that survived both fixes.
 
 ### P3 — two of the sharp edges
 
@@ -113,34 +103,92 @@ Four `never` stamps is the verb working. Three of those four previously read as 
 
 ---
 
+## Also shipped, second pass 2026-09-12
+
+### P2.1 — Hacker News can read now
+
+`hackernews:top [n]` and `hackernews:item <url-or-id>` are CLI-side DOM reads (HN has no API worth
+replaying and no CSP to fight). `item` returns comments with depth **and** the two states a 200
+hides: `[flagged]` and `[dead]`. That closes the contradiction where HN's own traps file demanded
+"open the item and read it back" from a site with no read verb. Proven: front page 30/30,
+`item 49671329` → 235 comments, depth-tagged.
+
+### P2.3 — `reddit:listing` was building a hostname, not a path
+
+`base.replace(/\/$/, "")` strips the only path segment a listing ROOT has, so `base + ".json"`
+produced `https://www.reddit.com.json` — a different **host**. DNS fails, `fetch` rejects with
+`TypeError: Failed to fetch`, and nothing in that message says the URL was wrong, so it read as a
+broken browser for weeks. Every listing root hit it; deeper permalinks were fine, which is why it
+survived. Fixed in browser-research (`aca4eb5`); reddit now verifies green.
+
+### P4.2 — `promote`: learned → canon as a review
+
+```
+chrome-agent note <domain> "<what you learned>"
+chrome-agent promote [<domain>] [--notes-only] [--apply]
+```
+
+ADR-0008 requires promotion to be deliberate and reviewed and shipped no tooling, so everything
+learned accumulated in a log nobody opens. `promote` diffs notes (and recorded drift) against the
+playbook and appends only below the keep-marker — deduped, so promoting twice is a no-op.
+
+**Drift is offered but not promoted by default.** A drift line is a failure report, not yet a trap:
+`reddit:upvote drifted: post-url required` is a usage mistake, not something the site lies about.
+Three such entries are sitting in the review queue right now, deliberately unapplied.
+
+Six real traps from today went through the loop into canon: the two reddit ones above, `li_at` and
+`auth_token` being HttpOnly, YouTube's readable-when-signed-out cookies, and HN's 200-on-dead.
+
+### P4.3 — a trap written into a generated file is no longer destroyed
+
+`traps.md` now carries `<!-- keep: hand-written below — the generator never touches this -->`.
+The generator owns everything above it and nothing below. A pre-marker file's non-generated lines
+are carried into a "fold these in or delete" block rather than dropped. Regeneration is idempotent
+and the promoted traps survive it — both checked.
+
+### P3.1 — headless is proven, cron is not
+
+`CHROMIUM_AGENT_HEADLESS=1` launched a throwaway profile end to end: `up` → `undetected` →
+`hackernews top` returned 3 posts, no window. So the answer `up` now points at when it hits
+`No rendezvous client` is real. **It was proven from a shell, not from cron** — a launchd job has a
+different bootstrap namespace, which is the whole reason that error exists. Do not promise cron
+until someone runs it there.
+
+### `verify` fixtures — the last of the false reds
+
+Three of the four `never` stamps were the probe's fault, not the site's: these recipes scrape THE
+CURRENT PAGE, so `youtube:channel-videos` on the homepage returns 0 items and looks like drift.
+Each domain now names the verb **and the page**; a chrome-agent verb is run through the CLI rather
+than `recipe()`. One injection got caught on the way: the verb table's `cli` field is a usage
+template, and `[n]` reached the page as JS (`ReferenceError: n is not defined`), so placeholders are
+stripped and `hackernews top` accepts digits only.
+
+| site | verified | by |
+|---|---|---|
+| linkedin.com | yes | `recipe:linkedin:feed` |
+| x.com | yes | `recipe:x:timeline` |
+| reddit.com | yes | `recipe:reddit:listing` (after the fix above) |
+| youtube.com | yes | `recipe:youtube:channel-videos` from a results page |
+| instagram.com | yes | `recipe:instagram:profile` from a profile page |
+| news.ycombinator.com | yes | `recipe:hackernews:top` |
+| facebook.com | **no** | feed read returns 0 items — the profile is signed out of facebook |
+
+facebook is the one honest red: `auth facebook.com` agrees, and no probe should turn that green.
+
+---
+
 ## Still open
 
-### P2 — real capability gaps
-
-- **news.ycombinator.com can write but cannot read.** It posts and comments and has no read recipe,
-  which collides with its own verification rule ("HN serves 200 on a dead post — read the item
-  back"). The one gap where a site's traps file demands a verb the site does not have.
-- **facebook.com, instagram.com, youtube.com are read-only.** Their `write.md` now says so rather
-  than leaving a hole an agent fills with a guess.
-- **reddit:listing is broken** (see above). Either fix the recipe or record the trap.
-- **`verify` cannot pass opts**, so a read recipe that needs an argument (`youtube:channel-videos`
-  wants a channel) can only ever report 0 items. Needs a per-site verify fixture — one known-good
-  opts blob per domain — before its `never` means "broken" rather than "unaskable".
-
-### P3 — remaining
-
-- `up` from a truly headless context is *pointed at*, not *proven*. Nobody has run the headless path
-  end to end under cron; do that before promising it.
-
-### P4 — the playbook system
-
-- **No promotion path from learned to canon.** apl ADR-0008 says promotion is deliberate and
-  reviewed and ships no tooling, so `~/.config/chrome-agent/<domain>/` accumulates true-but-
-  unpromoted knowledge until someone reads it. A `promote` that diffs learned against canon makes
-  that a review instead of an archaeology dig.
-- **Traps are hand-written and survive regeneration only via the generator's tables.** Deliberate —
-  only the verb surface has a source of truth — but a trap written straight into a generated file is
-  lost on the next run. Worth a guard.
+- **facebook.com and instagram.com remain read-only, youtube too.** Their `write.md` says so. Adding
+  a write means adding a recipe, not driving the DOM from a lane.
+- **Cron/launchd is unproven** (see P3.1). Run the headless path from an actual launchd job before
+  anything depends on it.
+- **The drift review queue is unstructured.** `promote` can only offer a drift line verbatim; there
+  is no way to edit one into a trap without hand-writing it. Fine for three entries, not for thirty.
+- **`auth` covers eight domains.** Anything else exits 1 rather than guessing — deliberate, but the
+  table has to grow with the playbooks.
+- **The ledger is 14 MB and has no rotation.** It now carries identity, which makes it worth keeping
+  and therefore worth rotating.
 
 ---
 

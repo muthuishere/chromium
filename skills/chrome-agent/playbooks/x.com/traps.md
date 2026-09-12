@@ -10,3 +10,6 @@ What this site lies about. Each entry cost someone real time.
 
 **Verification rule:** read the artifact back from the live page. A 2xx proves nothing
 here, and on some of these sites neither does a 5xx.
+
+<!-- keep: hand-written below — the generator never touches this -->
+- `auth_token` is HttpOnly; `ct0` (the csrf cookie) is not and only exists for a signed-in session. Corroborate with the profile link — it is also the only source of the handle.  _(promoted 2026-09-12, from note)_
