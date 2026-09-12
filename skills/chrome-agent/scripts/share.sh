@@ -100,16 +100,20 @@ wait_for_url(){ local logf="$1" url
 # one early. `stop` pkills on this marker so a cancelled share cancels its timer.
 TIMER_MARK="chrome-agent-share-timer"
 arm_timer(){ local secs="$1"
-  # python3 rather than `setsid`/`nohup`: start_new_session=True IS setsid, on every
-  # platform, and macOS has no setsid. This matters and it was MEASURED, not assumed:
-  # a plain `nohup ... &` timer DIED when its parent shell was torn down (macOS,
-  # 2026-09-12) — the TTL silently stopped being enforced in exactly the case the
-  # TTL exists for. Its own session survives that; the caller's shell is not
-  # load-bearing.
+  # Two defences, both MEASURED on macOS 2026-09-12, neither guessed:
+  #   1. start_new_session=True IS setsid (macOS ships no setsid binary), so the
+  #      timer leaves the caller's process group and session.
+  #   2. the timer ignores HUP/INT/TERM. A nohup timer AND a bare new-session
+  #      timer both died when the parent shell was torn down by a harness that
+  #      signals descendants — the TTL silently stopped being enforced in exactly
+  #      the situation the TTL exists for.
+  # Ignoring TERM would make the timer un-cancellable, so `stop` escalates to
+  # SIGKILL on $TIMER_MARK, which nothing can trap: cancel still works, a dying
+  # caller no longer extends a share.
   python3 - "$secs" "$SELF" "$TIMER_MARK" <<'PY'
 import shlex, subprocess, sys
 secs, me, mark = sys.argv[1], sys.argv[2], sys.argv[3]
-cmd = "sleep %s; %s stop --reason ttl # %s" % (secs, shlex.quote(me), mark)
+cmd = "trap '' HUP INT TERM; sleep %s; %s stop --reason ttl # %s" % (secs, shlex.quote(me), mark)
 p = subprocess.Popen(["bash", "-c", cmd], start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL)

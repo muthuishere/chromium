@@ -149,6 +149,9 @@ chrome-agent login <domain>                # opens the window there for a HUMAN;
 chrome-agent logout <domain>               # end THIS site's session; verifies with auth after
 chrome-agent sites list|show <d>|path <d>|validate|sync [--force]
 chrome-agent profile list | delete <dir> [--yes]
+chrome-agent read <domain> [generic:recipe]  # read ANY known site: its recipe, or the generic reader
+chrome-agent install [bindir]              # sites -> ~/.config/chrome-agent/sites (editable), CLI -> PATH
+chrome-agent ledger status|rotate          # the audit trail and its rotation
 chrome-agent doctor                        # can this machine run anything at all?
 chrome-agent share start|status|stop       # time-boxed remote login window (server, ADR 0003)
 chrome-agent verify <domain>               # run the site's real read verb; stamp playbook last_verified
@@ -197,6 +200,11 @@ $CHROME_AGENT_SITES            explicit override (tests, CI)
 `chrome-agent sites sync` installs shipped → installed and refuses to clobber a file you edited
 (`--force` does, and says what it replaced). So a site that breaks at 2am on a server is a one-file
 fix with no redeploy. Schema and the rules a probe must obey: `sites/SCHEMA.md`.
+
+**`chrome-agent read <domain>` works for every one of them.** A site with a read recipe runs it; a
+site without one gets `generic:page-text` pointed at the page its definition names — and the output
+says `"generic": true` plus how to promote it, because a page-text scrape is a weaker thing than a
+site's own API replay and must never be mistaken for one.
 
 **Writing a probe — the three rules that cost real time here:**
 1. The session cookies that matter are **HttpOnly**. `document.cookie` cannot see `li_at` or

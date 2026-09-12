@@ -122,7 +122,50 @@ cj(){ local out rc
 # and two profiles are in use. `agent` is the session key (the same one that owns the tab).
 log(){ printf '{"ts":"%s","profile":"%s","agent":"%s","action":"%s","target":"%s","result":%s}\n' \
   "$(date -u +%FT%TZ)" "$PROFILE" "$(_tab_id)" "$1" "$2" \
-  "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$3")" >> "$LEDGER"; }
+  "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$3")" >> "$LEDGER"
+  _ledger_rotate_if_big; }
+
+# ---- ledger rotation ------------------------------------------------------------------------
+# The ledger is the audit trail: which identity did what, when. It had no rotation and reached
+# 14 MB — every full-page read result is stored verbatim, so it grows in megabytes, not lines.
+# An unbounded audit log is one nobody opens, and eventually one that fills a server's disk. Roll
+# it on size, gzip the roll, keep a bounded history. Never delete the live file.
+CA_LEDGER_MAX="${CHROME_AGENT_LEDGER_MAX:-8388608}"   # 8 MB
+CA_LEDGER_KEEP="${CHROME_AGENT_LEDGER_KEEP:-5}"
+_ledger_size(){ wc -c < "$LEDGER" 2>/dev/null | tr -d ' ' || echo 0; }
+_ledger_rotate(){ # $1=reason
+  local n; n="$(dirname "$LEDGER")/actions-$(date -u +%Y%m%dT%H%M%SZ).ndjson"
+  mv "$LEDGER" "$n" 2>/dev/null || return 1
+  : > "$LEDGER"
+  gzip -f "$n" 2>/dev/null &
+  # Keep the newest N rolls. `ls -t` on the gz set, drop the tail.
+  local old; old=$(ls -t "$(dirname "$LEDGER")"/actions-*.ndjson.gz 2>/dev/null | tail -n +$((CA_LEDGER_KEEP+1)))
+  [ -n "$old" ] && printf '%s\n' "$old" | xargs rm -f 2>/dev/null
+  echo "ledger rotated -> ${n}.gz (${1:-size})" >&2
+  return 0
+}
+_ledger_rotate_if_big(){
+  local sz; sz="$(_ledger_size)"
+  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$sz" -gt "$CA_LEDGER_MAX" ] && _ledger_rotate "size ${sz}B > ${CA_LEDGER_MAX}B"
+  return 0
+}
+ledger(){ case "${1:-status}" in
+  status)
+    python3 -c 'import json,os,sys,glob
+p=sys.argv[1]; d=os.path.dirname(p)
+rolls=sorted(glob.glob(os.path.join(d,"actions-*.ndjson.gz")))
+def lines(f):
+    try: return sum(1 for _ in open(f,"rb"))
+    except Exception: return None
+print(json.dumps({"ledger":p,"bytes":os.path.getsize(p) if os.path.exists(p) else 0,
+ "entries":lines(p),"max_bytes":int(sys.argv[2]),"keep":int(sys.argv[3]),
+ "rolls":[{"file":os.path.basename(f),"bytes":os.path.getsize(f)} for f in rolls]},indent=2))'       "$LEDGER" "$CA_LEDGER_MAX" "$CA_LEDGER_KEEP" ;;
+  rotate) _ledger_rotate "manual" && ledger status ;;
+  *) die "$EX_USAGE" "usage" "ledger status|rotate" ;;
+esac; }
+
+
 
 # ---- PER-SESSION TAB (native tabId, 2026-07-28) ---------------------------------------------
 # The fork now hands out a stable per-tab UUID: NEWTAB:<id>|<url> acks {tabId}, LISTTABS reports
@@ -1001,6 +1044,40 @@ share(){ local sh="$SKILL/scripts/share.sh"
   [ -x "$sh" ] || [ -f "$sh" ] || die "$EX_USAGE" "not-installed" "scripts/share.sh is not present in this install"
   bash "$sh" "$@"; }
 
+# ---- read <domain> — every known site answers, whether or not it has a recipe -----------------
+# 12 of the 19 site definitions have no read recipe yet (read.verb = "eval"), and "we know this
+# site but cannot read it" is a useless kind of knowing. The site file already names the page worth
+# reading, and the registry already has generic readers, so: a site with a recipe runs it, and a
+# site without one gets the generic reader pointed at its fixture page. The output always says
+# which happened, because a generic page-text read is a weaker thing than a site's own API replay
+# and must never be mistaken for one.
+read_site(){ local domain; domain="$(_domain_norm "${1:-}")"
+  [ -n "$domain" ] || die "$EX_USAGE" "usage" "read <domain> [generic-recipe]  — e.g. chrome-agent read linkedin.com"
+  cj eval "1" >/dev/null 2>&1 || die "$EX_BROWSER" "browser-down" "no browser is servicing $SPOOL — run: chrome-agent up"
+  local gen="${2:-generic:page-text}" plan key cli url res how
+  plan="$(_verify_plan "$domain")"
+  key="$(printf '%s' "$plan" | cut -f1)"; cli="$(printf '%s' "$plan" | cut -f2)"; url="$(printf '%s' "$plan" | cut -f3)"
+  goto "$url" 6
+  if [ -n "$key" ]; then
+    how="$key"
+    if [ -n "$cli" ]; then res="$($CA_SELF ${cli#chrome-agent } 2>/dev/null)"; else res="$(recipe "$key")"; fi
+  else
+    how="$gen"; res="$(recipe "$gen")"
+  fi
+  python3 -c 'import json,sys
+res=sys.stdin.read().strip()
+try: v=json.loads(res)
+except Exception: v={"raw":res[:2000]}
+out={"domain":sys.argv[1],"read_with":sys.argv[2],"page":sys.argv[3],
+     "definition":sys.argv[4] or "none",
+     "generic":sys.argv[2].startswith("generic:"),
+     "result":v}
+if out["generic"]:
+    out["note"]="this site has no read recipe — you are getting the page as text, not its API. "\
+                "Promote it: capture the real call (chrome-agent capture arm|dump) and add a recipe."
+print(json.dumps(out,separators=(",",":")))' "$domain" "$how" "$url" "$(_site "$domain" status)" <<<"$res"
+}
+
 # ---- install (ADR 0004 + 0006) ---------------------------------------------------------------
 # One command that makes this machine ready, and puts the editable half where it can be edited:
 #   ~/.config/chrome-agent/sites/    the site definitions — THE place to fix a re-skinned page
@@ -1159,11 +1236,13 @@ It RUNS browser-research's verified recipes through the fork — no per-site rei
   verify <domain>                 run the site's real read recipe; stamp playbook last_verified
   note <domain> "<learned>"       capture site knowledge the moment you learn it
   promote [<domain>] [--apply] [--notes-only]   review what is known but not in the playbook
+  read <domain> [generic:recipe]  read any known site — its own recipe, or the generic reader
   logout <domain>                 end THIS site's session; verifies with auth afterwards
   profile create <dir> | list | delete <dir> [--yes]
   sites list | show <domain> | path <domain> | validate | sync [--force]
   doctor                          is this machine able to run anything at all?
   install [bindir]                sites -> ~/.config/chrome-agent/sites (editable), CLI -> PATH
+  ledger status|rotate            the audit trail: who did what, and its rotation
   share start|status|stop         time-boxed remote login window on a server (ADR 0003)
   profile | spool                 which profile/spool this invocation resolves to
   exit-codes [--json]             0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused
@@ -1193,7 +1272,9 @@ case "${1:-}" in
       *) die "$EX_USAGE" "usage" "profile [create <dir> | list | delete <dir> [--yes]]";; esac;;
   auth) auth "${2:-}";; login) login "${2:-}";; logout) logout "${2:-}";; verify) verify "${2:-}";;
   doctor) doctor;;
+  read) read_site "${2:-}" "${3:-}";;
   install) install_ "${2:-}";;
+  ledger) ledger "${2:-status}";;
   share) shift; share "$@";;
   sites) shift; case "${1:-list}" in
       list) python3 "$SITES_PY" list "${2:-}";;

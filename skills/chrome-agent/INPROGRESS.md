@@ -237,6 +237,31 @@ the correction with citations rather than a quiet edit.
 question whose wrong answer is a hang (fork present, built, spool, tools, sites dir); the playbook
 generator now emits a playbook for a site that has a definition but no recipe, so all 19 have one.
 
+### `read <domain>` — all 19 sites answer, and the weak ones say so
+
+12 of the 19 definitions have no read recipe, and "we know this site but cannot read it" is a
+useless kind of knowing. `read` runs the site's own recipe when there is one and points
+`generic:page-text` at the page the definition names when there is not — flagging `"generic": true`
+plus how to promote it, because a page-text scrape must never be mistaken for an API replay.
+
+Swept across every site: linkedin 20 posts, reddit 50, HN 30, instagram 12, and real text from
+bsky/mastodon/stackoverflow/dev.to/producthunt/medium/indiehackers/github. `quora` (347 chars) and
+`discord` (268) return almost nothing — both are login walls, which is the correct answer for a
+signed-out profile and exactly what `auth` says about them. `facebook` reads empty for the same
+reason.
+
+### The ledger rotates
+
+14.7 MB with no rotation — every read result stored verbatim. It rolls on size (8 MB default),
+gzips the roll (14.7 MB → 3.5 MB), keeps 5, and never deletes the live file. `ledger status|rotate`.
+An unbounded audit log is one nobody opens and eventually one that fills a server disk.
+
+### `install`
+
+`chrome-agent install` creates `~/.config/chrome-agent/{sites,learned,share}`, syncs the site
+definitions into the editable dir, and symlinks the CLI onto PATH — a symlink, not a copy, because
+a copy is a second version of the CLI that ages silently.
+
 ---
 
 ## Still open
@@ -253,8 +278,9 @@ generator now emits a playbook for a site that has a definition but no recipe, s
   unavailable; what is left is hashed-class DOM scraping. Keep it probe-only or drop it.
 - **`write` is empty for all 12 new sites.** No publish path was justified without driving the
   browser, which was correctly off-limits to the research agents.
-- **No read recipes for the new sites** — `read.verb` is `eval` plus a fixture page. Each file's
-  `notes` names the endpoint a recipe should replay; that is the next unit of work.
+- **No read recipes for the new sites** — `read <domain>` covers them with the generic reader, which
+  is a floor, not a ceiling: it cannot paginate, cannot read a thread, and returns a login wall as
+  ~300 characters of nothing. Each file's `notes` names the endpoint a real recipe should replay.
 - **facebook.com stays red**, honestly: the profile is signed out and `auth` agrees.
 - **Cron/launchd still unproven**, and **the ledger still has no rotation** (now 14 MB, and now
   worth keeping because it carries identity).
