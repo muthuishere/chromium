@@ -128,3 +128,47 @@ provable by running the browser.
 about the site — apl owns it (`apl identity set browser:<label> --site <domain>`), and playbooks
 deliberately name no identity. A site is reachable as more than one person; the moment a default
 identity lands in a playbook, the multi-identity design silently becomes single-identity.
+
+---
+
+## The apl-facing contract, if you build profile + login
+
+apl already has the slot for this. ADR-0007 makes `login` a capability — "prepare the child process
+that ESTABLISHES the credential" — and its table has one blank row:
+
+| `browser:<label>` | *nothing* — chrome-agent has no sign-in command; apl says so |
+
+Fill that row and apl needs **no new concept**: its browser adapter implements the existing
+`PrepareLogin` interface and `exec`s whatever this CLI exposes, exactly as `apl login whatsapp:biz`
+execs `wacli auth` and lets the QR render in the user's terminal.
+
+Three verbs would close it:
+
+```
+chrome-agent profile create <dir>        # make a profile, do not launch
+chrome-agent login <domain>              # open THIS profile at that site, headful, for a human
+chrome-agent auth  <domain>              # read-only: {signed_in: bool, as?: string}
+```
+
+**`login` must not type anything.** It opens the window and gets out of the way. apl's job is to
+exec it and then verify with `auth` — never to supply a credential. That is ADR-0008's manual-login
+rule, and it is the reason a password never reaches an agent's context.
+
+### One thing ADR-0007 under-specifies, and this is where it shows
+
+`apl login whatsapp:biz` is unambiguous: one account, one pairing. **A browser profile is not signed
+into a thing — it is signed into many sites.** So `apl login browser:deemwar` has no single meaning,
+and the answer has to be per site:
+
+```
+apl login browser:deemwar --site linkedin.com
+```
+
+which implies `login` and `auth` here are **domain-scoped, not profile-scoped**. Build them that way
+from the start; a profile-scoped `signed_in: true` would be a lie the moment one site's cookie
+expires while another's holds — and a green light nobody verified is the failure this whole design
+exists to prevent.
+
+`profile create` is the one that is genuinely profile-scoped. apl should never `mkdir` a profile
+itself: today it reports `dangling` when the directory is missing, and with `profile create` it can
+exec this instead of quietly creating a logged-out profile that looks configured.
