@@ -275,15 +275,49 @@ An unbounded audit log is one nobody opens and eventually one that fills a serve
 definitions into the editable dir, and symlinks the CLI onto PATH — a symlink, not a copy, because
 a copy is a second version of the CLI that ages silently.
 
+### The share — the tunnel half is proven, the X half is not
+
+`chrome-agent share start|status|stop|reconcile` (`scripts/share.sh`, `docs/share.md`). Verified
+independently tonight, not just reported: a 60s selftest served a file over
+`https://…trycloudflare.com` (HTTP 200 fetched from off-tunnel), the TTL fired **unattended after
+the starting shell had exited**, the URL then returned 530, no cloudflared and no timer process
+remained, and both `share-start` and `share-stop reason=ttl` are in the ledger with the profile.
+
+**Two bugs the TTL test caught, each of which silently disabled the security property:** a
+`nohup … &` timer died with its parent shell — the TTL stopped being enforced in exactly the case it
+exists for — and cancelling that timer with `pkill -f <marker>` killed the wrong process, including
+the teardown's own shell, leaving the tunnel up with nothing logged. Neither is visible in a
+happy-path test. Both were found by letting the TTL actually fire.
+
+**`share start` refuses on macOS**, deliberately: a share exists because a server has no screen, and
+a Mac has one. A degraded mac mode is precisely the one that would get used casually and then go
+stale on a tunnel. Its exit codes were aligned to this CLI's contract (wrong platform is 1/usage,
+not 2 — 2 means "not signed in" and this is reachable as `chrome-agent share`).
+
+**Unproven, and it is the important half:** Xvfb → x11vnc → noVNC, the fork running headful on a
+virtual display, and a human actually logging in through it. Nothing in this project has run on
+Linux yet. Also noted: noVNC's `?password=` is the VNC password, so the effective secret is 8 hex
+characters — fine for a 15-minute window behind an unguessable hostname, not fine for anything
+longer, and the fix if this graduates is Cloudflare Access, not a longer password.
+
+### `selftest.sh` — 28 checks, none destructive
+
+`bash scripts/selftest.sh` exercises the contract (exit codes, JSON shapes, the fork guard), both
+historic spool-keying bugs, the profile-lifecycle guards, the site resolution order, and — when a
+browser is up — auth/logout/read. It never posts, never likes, never logs out of a real site and
+never deletes a real profile: the logout and read paths run against a synthetic `example.com`
+definition in a temp dir, because proving a code path should not cost the owner a session.
+28 pass, 0 fail.
+
 ---
 
 ## Still open
 
-- **Nothing here has run on Ubuntu.** `scripts/server-install.sh` and `docs/server-ubuntu.md` exist
+- **Nothing here has run on Ubuntu** — and that is now the single blocking item for ADR 0003. `scripts/server-install.sh` and `docs/server-ubuntu.md` exist
   and are statically clean; the fork has never been built or started on Linux from this repo. Until
   it is, ADR 0003 is macOS-only in fact and Linux-only in intent.
-- **The share is the next thing to prove.** Tunnel-up, login-through, tunnel-down, nothing left
-  listening — checked from off-box.
+- **The share's X half is the next thing to prove**: a human logging in through noVNC on a virtual
+  display, then `chrome-agent auth <domain>` green on the server. The tunnel half is done.
 - **17 of 19 site definitions have an unproven signed-IN path.** They need a human session, once,
   per site. `probe_checked` records exactly which half is proven.
 - **`discord.com` probably does not belong.** Its API authenticates on a header, not cookies, so the

@@ -214,7 +214,9 @@ is all of the risk and none of the benefit.
 
 To exercise the tunnel half here without a browser:  share.sh selftest --ttl 60s
 MSG
-    exit 2
+    # 1, not 2: chrome-agent's exit contract reserves 2 for "not signed in", and this script is
+    # reachable through `chrome-agent share`. Wrong platform is a usage error — nothing attempted.
+    exit 1
   fi
 
   [ -f "$STATE" ] && die "a share is already recorded ($(jget url)); run 'share.sh stop' first"
@@ -316,5 +318,5 @@ case "$cmd" in
 usage: share.sh start [--ttl 15m] [--port N] | status | stop | reconcile
        share.sh selftest [--ttl 60s]     # tunnel half only, no browser
 USAGE
-     exit 64;;
+     exit 1;;   # usage, per chrome-agent's exit contract (exit-codes --json)
 esac

@@ -1,11 +1,14 @@
 # ADR 0003 — chrome-agent on a server: headless fork, human login over a time-boxed share
 
-- **Status:** **PROPOSED — nothing in this ADR is built.** §4 was CORRECTED on 2026-09-12 after a
-  spike read the cookie-encryption path in this fork's own source: the profile-carry escape hatch
-  it originally implied does not exist across operating systems. One load-bearing piece is already
-  proven: `CHROMIUM_AGENT_HEADLESS=1` launched a throwaway profile end to end on macOS
-  (2026-09-12 — `up` → `undetected` → `hackernews top` → 3 posts, no window). Everything else
-  below — the Ubuntu build, the X stack, the share — is a design, not a result.
+- **Status:** **HALF BUILT AND HALF PROVEN, 2026-09-12.** The CLI side exists: `up --headless`
+  (proven end to end on a throwaway profile), `login` refuses under headless and points here,
+  `doctor`, and `chrome-agent share` wired to `scripts/share.sh`. **The tunnel half is proven on
+  macOS** with a dummy http.server: tunnel up, fetched from off-tunnel, torn down, URL then 530,
+  no process and no listener left — and the TTL enforced unattended after the starting shell
+  exited. **The X half is entirely unproven** — Xvfb → x11vnc → noVNC, the fork headful on a
+  virtual display, and a human login through it have never run, because nothing in this project has
+  ever run on Linux. §4 was CORRECTED before anything was built on it: the profile-carry escape
+  hatch it implied does not exist across operating systems.
 - **Date:** 2026-09-12
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)
@@ -91,6 +94,15 @@ one URL. The design rules, all of which come from the 2026-07-06 incident:
 - **State is a file, not a shell** — a session that dies must not leave a tunnel up. Boot and
   watchdog both reconcile: a share whose expiry has passed is torn down.
 
+**Two bugs the TTL test caught, both of which silently disabled the security property** (2026-09-12):
+a `nohup … &` timer **died with its parent shell**, so the TTL stopped being enforced in exactly the
+case it exists for — fixed by starting the timer in its own session and having it ignore HUP/INT/TERM.
+And cancelling that timer with `pkill -f <marker>` killed the wrong process: it matched an unrelated
+shell that merely mentioned the marker, and when the timer itself called `stop` the pattern kill was
+suicide mid-teardown — the tunnel stayed up and nothing was logged. Fixed by cancelling the process
+group, skipping when the caller is inside it, and writing state and ledger *before* the kill.
+Neither bug is visible in a happy-path test; both were found by letting the TTL actually fire.
+
 `share` is not a remote-control feature. It is a login window with a lock on it. It should feel
 like handing someone a key, watching them use it, and taking it back — which is exactly how the
 chrome-agent skill already describes the browser-bridge remote tunnel.
@@ -131,6 +143,20 @@ Rules that follow:
 - **Mac → Linux: do not carry. Log in through the share.** That is the entire reason §3 exists.
 - **Always re-check per site on arrival** with `chrome-agent auth <domain>`. Never assume. This is
   mandatory, not advisory — it is the only thing that catches the silent case.
+
+### macOS: `share start` refuses
+
+A share exists because a server has no screen. A Mac has one, so exposing a logged-in browser over
+a tunnel to save a glance at your own display is all of the risk and none of the benefit — and a
+degraded mac mode is precisely the one that would get used casually and then go stale on a tunnel.
+`share.sh selftest` keeps the tunnel half testable on a Mac with a dummy server, never the real
+browser.
+
+### The token is 32 bits, and that is a deliberate limit
+
+noVNC's `?password=` is the VNC password, so the effective secret is 8 hex characters — adequate for
+a 15-minute window behind an unguessable hostname, and *not* adequate for anything longer. If this
+graduates from a spike, Cloudflare Access in front of it is the fix, not a longer VNC password.
 
 ## Alternatives rejected
 
