@@ -135,13 +135,21 @@ error, check `chrome-agent status` before concluding a session died.
 
 ```
 chrome-agent up [url] | status | goto <url> | shot [path]
-chrome-agent recipes                       # list every runnable recipe (live catalog)
+chrome-agent recipes [--json]              # every runnable verb (registry + chrome-agent's own)
 chrome-agent recipe <site:name> [opts-json] [csp] # run ANY browser-research recipe via the fork (3rd arg csp = CSP-safe eval)
 chrome-agent do <site:name> [opts] [verify-js]  # VERIFY-OR-LEARN: run + verify; on fail auto-arm capture
 chrome-agent evalAsync '<async-js>'        # general async escape hatch (no recipe yet); alias of evalwithoutcsp
 chrome-agent evalwithoutcsp '<async-js>'   # DEFAULT eval path — eval(atob()) inside the injected script
 chrome-agent evalwithcsp '<js-that-returns>'  # CSP-SAFE eval — source injected directly, survives strict script-src (LinkedIn etc.)
 chrome-agent linkedin like [post-url] [--confirm]  # self-verifying (aria-state flip); staged w/o --confirm
+
+# identity — DOMAIN-SCOPED, because a profile is signed into SITES, not into "a thing":
+chrome-agent auth <domain>                 # read-only {signed_in, as?}; exit 0 = yes, 2 = no
+chrome-agent login <domain>                # opens the window there for a HUMAN; types NOTHING
+chrome-agent verify <domain>               # run the site's real read verb; stamp playbook last_verified
+chrome-agent profile create <dir>          # make a profile, do not launch
+chrome-agent profile | spool               # which profile/spool this invocation resolves to
+chrome-agent exit-codes [--json]           # the exit-code contract
 
 # fast-learning:
 chrome-agent capture arm|dump|clear        # learn a site's REAL api: arm, act by hand, dump
@@ -165,6 +173,38 @@ a live X session** in the profile; when logged out, `x like/repost` correctly re
 Any write recipe works via the general runner too:
 `chrome-agent recipe linkedin:comment '{"postUrl":"…","text":"…","confirm":true}'`,
 `chrome-agent recipe x:reply '{…}'`, `chrome-agent recipe reddit:post '{…}'`, etc.
+
+## Where the browser lives, and what an exit code means (2026-09-12)
+
+**`CHROME_AGENT_FORK`** — the chromium fork this drives. Default: `~/muthu/gitworkspace/chromium`,
+so nothing changes on the owner's machine. Set it to run anywhere else. A missing fork now names
+the missing file and exits 3; an unbuilt fork says so and gives the `autoninja` line. There is no
+stock-Chrome fallback: the spool/tabId protocol is a fork patch, so stock Chrome would not lose
+undetectability, it would lose every verb.
+
+**Exit codes are a contract** — `chrome-agent exit-codes --json` is the machine-readable copy:
+
+| code | means | the fix |
+|---|---|---|
+| 0 | ok | — |
+| 1 | usage — nothing was attempted | fix the argument |
+| 2 | not signed in for that site | a **human** signs in: `chrome-agent login <domain>` |
+| 3 | browser unreachable (no fork, no build, nothing servicing the spool) | `chrome-agent up` |
+| 4 | the browser worked and the site said no | read the site's `traps.md` |
+
+2 and 3 are the split that matters: "re-login" and "start the browser" are different jobs, and a
+caller that cannot tell them apart retries the wrong one forever.
+
+**`auth`/`login` are per DOMAIN, never per profile.** A profile is signed into many sites at once,
+so a profile-level `signed_in: true` becomes a lie the moment one site's cookie expires while
+another's holds — a green light nobody verified. Two traps live in these probes, both proven here:
+`li_at` (LinkedIn) and `auth_token` (X) are **HttpOnly**, so gating on `document.cookie` reports a
+live session as logged out; and reddit's `/api/v1/me.json` answers **200 with no `name`** when
+signed out. Ask the site's API or its own config object, never the readable cookie jar.
+
+**`login` types nothing.** It opens the window and gets out of the way. A password an agent can
+type is a password inside an agent's context, and automated sign-in is the fastest route to a
+restricted account. apl execs `login`, the human signs in, apl confirms with `auth`.
 
 ## CSP-safe eval — for strict-CSP sites (2026-07-28)
 

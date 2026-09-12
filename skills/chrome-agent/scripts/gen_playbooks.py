@@ -7,15 +7,22 @@ Playbooks name NO identity — a site does not have one; a person chooses it, an
 may use two. apl binds browser:<label> to a site, not this file.
 
 Hand-written playbooks drift into fiction: the first cut of this set listed
-linkedin:like, x:like and x:repost, none of which exist. Generating from the
-registry means a documented verb is a verb that is actually registered.
+linkedin:like, x:like and x:repost as registry recipes, which they are not --
+they are chrome-agent's own DOM verbs. Generating means a documented verb is a
+verb something can actually run, and says which half runs it.
 
-    python3 gen_playbooks.py <registry-recipes-dir> <out-dir>
+The verb list comes from `chrome-agent recipes --json`, not from parsing someone else's
+source. The earlier version regex-matched keys out of registry.js across a repo boundary and
+inferred "is this a write?" from the FILE a key lived in (post.js) -- which broke the moment a
+write lived elsewhere, and missed every verb chrome-agent implements itself (the reaction verbs
+are CLI-side, so the registry-only view concluded liking was impossible and said so in a
+playbook). The CLI knows; ask it.
+
+    python3 gen_playbooks.py <out-dir>
 """
-import os, re, sys, datetime
+import json, os, subprocess, sys
 
-KEY = re.compile(r'"([a-z0-9]+):([a-z0-9_-]+)"\s*:')
-DESC = re.compile(r'describe\s*:\s*"([^"]+)"')
+CLI = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chrome-agent")
 
 # recipe prefix -> the domain it drives
 DOMAIN = {
@@ -51,22 +58,16 @@ SHARED_TRAP = ("**One shared browser, no mutex.** Two lanes attach to a nondeter
                "  `chrome-agent goto <url>` then `chrome-agent status` before believing any read.")
 
 
-def collect(recipes_dir):
-    """key -> (verb, describe, is_write). post.js is the write surface."""
+def collect():
+    """domain -> [(key, verb, describe, is_write, source)], straight from the CLI."""
     out = {}
-    for fn in sorted(os.listdir(recipes_dir)):
-        if not fn.endswith(".js"):
+    raw = subprocess.run([CLI, "recipes", "--json"], capture_output=True, text=True, check=True).stdout
+    for r in json.loads(raw):
+        domain = DOMAIN.get(r["site"])
+        if not domain:
             continue
-        text = open(os.path.join(recipes_dir, fn), encoding="utf-8", errors="replace").read()
-        is_write = fn == "post.js"
-        for m in KEY.finditer(text):
-            site, verb = m.group(1), m.group(2)
-            if site not in DOMAIN:
-                continue
-            tail = text[m.end():m.end() + 600]
-            d = DESC.search(tail)
-            out.setdefault(DOMAIN[site], []).append(
-                (f"{site}:{verb}", verb, d.group(1) if d else "", is_write))
+        out.setdefault(domain, []).append(
+            (r["key"], r["verb"], r["describe"], r["write"], r["source"]))
     return out
 
 
@@ -76,28 +77,50 @@ def write(path, body):
 
 
 def main():
-    recipes_dir, out_dir = sys.argv[1], sys.argv[2]
-    today = datetime.date.today().isoformat()
-    sites = collect(recipes_dir)
+    out_dir = sys.argv[1]
+    sites = collect()
     for domain, entries in sorted(sites.items()):
-        reads = [e for e in entries if not e[3]]
-        writes = [e for e in entries if e[3]]
+        reads = sorted(e for e in entries if not e[3])
+        writes = sorted(e for e in entries if e[3])
         d = os.path.join(out_dir, domain)
 
-        write(os.path.join(d, "meta.md"),
-              "---\ndomain: %s\nidentity: browser:deemwar\naliases: %s\nstaged: true\n"
-              "last_verified: %s\nsource: generated from the browser-research recipe registry\n---\n\n"
-              "# %s\n\nVerbs below are the recipes actually registered for this site. A verb that is\n"
-              "not listed does not exist — do not improvise one.\n\n"
+        # NO identity line. A site is reachable as more than one person, and the moment a default
+        # identity appears in a playbook the multi-identity design is single-identity in practice.
+        # apl owns that binding (`apl identity set browser:<label> --site <domain>`).
+        #
+        # last_verified starts at `never`: a generation date proves a generator ran, not that the
+        # site still answers. Only `chrome-agent verify <domain>` stamps a real date, on success.
+        # An existing stamp is preserved -- regenerating the verb list must not un-verify a site.
+        meta = os.path.join(d, "meta.md")
+        stamp = "never (run: chrome-agent verify %s)" % domain
+        if os.path.exists(meta):
+            for line in open(meta):
+                if line.startswith("last_verified:"):
+                    prev = line.split(":", 1)[1].strip()
+                    # Only a stamp written by `verify` is kept -- it carries how it was proven,
+                    # e.g. "2026-09-12 (recipe:linkedin:feed)". A bare date is an old generation
+                    # stamp: it proves nothing, so it goes back to `never` rather than ageing on.
+                    if "(" in prev:
+                        stamp = prev
+                    break
+        write(meta,
+              "---\ndomain: %s\naliases: %s\nstaged: true\n"
+              "last_verified: %s\nsource: generated from `chrome-agent recipes --json`\n---\n\n"
+              "# %s\n\nVerbs below are the ones that actually exist for this site — registry recipes\n"
+              "plus chrome-agent's own verbs. A verb that is not listed does not exist — do not\n"
+              "improvise one.\n\n"
               "Capability files: `read.md` · `write.md` · `login.md` · `traps.md`\n"
-              % (domain, ALIASES.get(domain, domain.split(".")[0]), today, domain))
+              % (domain, ALIASES.get(domain, domain.split(".")[0]), stamp, domain))
 
         def block(es):
-            return "".join("  %s: chrome-agent recipe %s\n" % (v, k) for k, v, _, _ in es)
+            return "".join(
+                "  %s: %s\n" % (v, ("chrome-agent recipe %s" % k) if src == "registry"
+                                    else ("chrome-agent %s %s" % (k.split(":")[0], v)))
+                for k, v, _, _, src in es)
 
         rb = block(reads) + "  eval: chrome-agent evalwithcsp '<js>'\n"
-        rl = "".join("- `%s` — %s\n" % (k, dsc or "no description in the registry")
-                     for k, _, dsc, _ in reads) or "- (no read recipe registered for this site)\n"
+        rl = "".join("- `%s` — %s\n" % (k, dsc or "no description recorded")
+                     for k, _, dsc, _, _ in reads) or "- (no read recipe registered for this site)\n"
         write(os.path.join(d, "read.md"),
               "---\nverbs:\n%s---\n\n# %s — read\n\n%s\n"
               "A read is a **sample**, not a set — these surfaces are personalised and paginated.\n"
@@ -106,13 +129,15 @@ def main():
               % (rb, domain, rl))
 
         if writes:
-            wl = "".join("- `%s` — %s\n" % (k, dsc or "no description in the registry")
-                         for k, _, dsc, _ in writes)
+            wl = "".join("- `%s` — %s%s\n" % (k, dsc or "no description recorded",
+                                             "" if src == "registry" else "  _(chrome-agent verb, not a registry recipe)_")
+                         for k, _, dsc, _, src in writes)
             body = ("---\nverbs:\n%s---\n\n# %s — write\n\n"
                     "**Staged by default.** Every write is prepared and held until `--confirm`.\n"
                     "That is what keeps publishing owner-gated by construction; do not route around it.\n\n"
-                    "Confirm the identity first — `browser-for %s` names the handle that owns this\n"
-                    "site. Posting from the wrong one is the failure this design exists to prevent.\n\n"
+                    "Confirm the identity first — apl names the handle that owns this site\n"
+                    "(`apl identity get --site %s`). Posting from the wrong one is the failure this\n"
+                    "design exists to prevent.\n\n"
                     "%s\nVerify by reading the artifact back from the live page. See `traps.md`.\n"
                     % (block(writes), domain, domain, wl))
         else:

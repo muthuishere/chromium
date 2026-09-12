@@ -1,174 +1,167 @@
 # chrome-agent — what to build next
 
-Written 2026-09-12, after apl (`deemwar-products/apl`) stopped vendoring this script and started
-merely referring to it (apl ADR-0009). Everything below is a gap **observed while wiring that up**,
-not a wishlist — each item names how it was found.
+Written 2026-09-12 after apl (`deemwar-products/apl`) stopped vendoring this script and started
+merely referring to it (apl ADR-0009); **P0 and P1 were built the same day** and are recorded below
+as shipped, with how each was proven. Everything here was found while wiring apl up, not imagined.
 
-The split now: chrome-agent owns site knowledge and the browser; apl owns which identity acts and
-joins the two. So anything here that is "how a site behaves" belongs in this repo, and anything that
-is "who is acting" does not.
+The split: chrome-agent owns site knowledge and the browser; apl owns which identity acts and joins
+the two. Anything that is "how a site behaves" belongs here; anything that is "who is acting" does
+not.
 
 ---
 
-## P0 — the one thing that blocks everything else
+## Shipped 2026-09-12
 
-### 1. `FORK` is hardcoded, so this runs on exactly one machine
+### P0 — `FORK` is no longer hardcoded
 
-```sh
-FORK="$HOME/muthu/gitworkspace/chromium"     # chrome-agent:16
-CJS="$FORK/chromesendkeys.cjs"
-LAUNCH="$FORK/chromium-agent-launch.cjs"
+`CHROME_AGENT_FORK`, defaulting to the owner's checkout, so nothing on this machine changed. A
+missing fork exits **3** naming the absent file; an unbuilt fork says so and gives the `autoninja`
+line. The preflight runs at the top of the dispatcher, not only inside `cj` — a `die` inside `cj`
+runs in a command substitution, so its exit never reached the caller and its JSON was swallowed by
+whatever was capturing stdout.
+
+**No stock-Chrome degraded mode, deliberately.** The spool/tabId protocol is a fork patch: stock
+Chrome would not lose undetectability, it would lose every verb. If that changes it belongs behind
+its own engine flag, never behind a silent fallback.
+
+### P1.2 — `recipes --json`
+
+`recipes-list.mjs` is now the single source of "what verbs exist": registry recipes **and**
+chrome-agent's own DOM verbs, each entry carrying `{key, site, verb, describe, write, world,
+source, cli}`. 46 entries, 20 of them writes. `gen_playbooks.py` calls the CLI instead of
+regex-parsing `registry.js` across a repo boundary, and `write` comes from the registry's own flag
+rather than from which file a key happened to live in.
+
+That merge also killed the P2 claim below it: the registry has no reaction recipe for any site, but
+this CLI has `linkedin:like`, `x:like`, `x:repost`, `reddit:upvote` as self-verifying DOM verbs. A
+generator that saw only the registry concluded reacting was impossible and wrote that into a
+playbook. Both sources, one list, each entry naming its own.
+
+### P1.3 — `auth <domain>` (and `login`, `profile create`)
+
+```
+chrome-agent auth  <domain>   # read-only {signed_in, as?} — exit 0 signed in, 2 not
+chrome-agent login <domain>   # opens the window there for a HUMAN; types NOTHING, ever
+chrome-agent profile create <dir>
 ```
 
-The CLI is portable; the browser is not. A different session or directory on this Mac is fine, a
-different **machine** is not — it needs a 1.4 GB fork checked out at that exact path, plus a built
-`out/Default`.
+**Domain-scoped, never profile-scoped** — a profile is signed into many sites, so one boolean for
+the profile is a lie the moment one cookie expires while another holds.
 
-This is the single reason `browser:` identities cannot ship to anyone else. apl can sell
-`github:` and `whatsapp:` today and cannot sell `browser:`, and that is entirely this line.
+Proven live: `linkedin.com → Suguna Paulraj`, `x.com → deemwarmonads`, `github.com → deemwario`,
+`news.ycombinator.com → deemwar`; `youtube.com` and `reddit.com` correctly report signed out.
 
-**Build:** `CHROME_AGENT_FORK` with the current value as default, and a real error when the fork is
-absent — naming what is missing, not a bare "file not found" from node. Then decide whether a
-stock Chrome/Brave profile is a supported degraded mode (loses undetectability, keeps the verbs).
+Two traps, both hit while building this:
 
----
+- **`li_at` and `auth_token` are HttpOnly.** The first cut gated on `document.cookie` and reported
+  a perfectly live LinkedIn session as logged out — the same false-negative that once cost 44 hours
+  of posting. Ask the site's API (`/voyager/api/me`) and let the browser attach the cookie.
+- **reddit's `/api/v1/me.json` returns 200 when signed out**, body `{"features":{…}}` with no
+  `name`. The status code is not the verdict. Same shape as the HN trap, different site.
+- YouTube: the readable cookies (`PREF`, `__Secure-3PAPISID`) are present when signed **out**; the
+  meaningful ones are HttpOnly. `ytcfg.data_.LOGGED_IN` is YouTube's own answer — use it.
 
-## P1 — what apl needs from here specifically
+### P1.4 — documented exit codes
 
-### 2. `recipes --json`
+`0 ok · 1 usage · 2 not signed in · 3 browser unreachable · 4 site refused`, machine-readable via
+`chrome-agent exit-codes --json`. 2 vs 3 is the split that matters: "a human must sign in" and
+"start the browser" are different jobs, and a caller that cannot tell them apart retries the wrong
+one forever.
 
-`chrome-agent recipes` already prints all 42 with descriptions — good. But `--json` is silently
-ignored, so apl's playbook generator **regex-parses `registry.js`** to learn the verb list:
+### P4.1 — `verify <domain>` makes `last_verified` mean something
 
-```py
-KEY = re.compile(r'"([a-z0-9]+):([a-z0-9_-]+)"\s*:')   # gen_playbooks.py
-```
+Runs the site's real read recipe (or its auth probe where no read recipe exists — HN) and stamps
+`last_verified: <date> (<how>)` **only on success**. The generator preserves a stamp that carries a
+`(how)` and resets a bare date back to `never`: a generation date proves a generator ran.
 
-That reaches across a repo boundary into someone else's source layout and breaks on any formatting
-change. The tool already knows the answer.
+The first cut of this verb **stamped three lies**, and they are the reason it checks three things
+now. `_ensure_origin` navigates only for the four sites it knows, so `verify instagram.com` ran
+`instagram:post` against whatever page the tab was already on — it scraped **reddit**, found images,
+and reported instagram verified. `facebook:feed` returned `postCount: 0` with no error and passed
+too. So verify now navigates to the domain first, rejects a result whose own `url` is not that
+domain, and rejects an empty read: "the verb ran" is not "the verb works".
 
-**Build:** `recipes --json` emitting `{key, site, verb, describe, write: bool, world}`. Then the
-generator calls the CLI instead of reading JS, and `write: true` replaces "the key came from
-post.js" as the way writes are identified.
+Honest state after that fix:
 
-### 3. A session/auth verb — apl currently cannot tell if a profile is signed in
+| site | verified | by |
+|---|---|---|
+| linkedin.com | yes | `recipe:linkedin:feed` |
+| x.com | yes | `recipe:x:timeline` |
+| news.ycombinator.com | yes | `auth` (no read recipe exists) |
+| reddit.com | **no** | `reddit:listing` → `TypeError: Failed to fetch` |
+| facebook.com | **no** | feed read returns 0 items (signed out, or drift) |
+| instagram.com | **no** | read returns 0 items |
+| youtube.com | **no** | `youtube:channel-videos` returns 0 from the homepage — it likely wants a channel in `opts`, which `verify` has no way to supply yet |
 
-There is no `auth`, `status --auth`, `whoami` or `signedin` verb. So apl's browser probe can only
-check that a profile *directory* exists, which means a `browser:` handle can never report better
-than `unknown` — even when the session is dead. Every playbook says "an expired session shows a
-login wall"; nothing can assert that programmatically.
+Four `never` stamps is the verb working. Three of those four previously read as a fresh green date.
 
-**Build:** `chrome-agent auth <domain>` → `{signed_in: bool, as?: string}`, read-only, no navigation
-side effects if possible. apl's `Probe` consumes it directly and `apl accounts --check` starts
-reporting a real state. This is the highest-value item after P0.
+### P3 — two of the sharp edges
 
-### 4. Documented, stable exit codes
-
-apl maps child exit codes to user/auth/network errors. This script has no documented exit contract,
-so apl cannot distinguish "the site said no" from "the browser was not running".
-
-**Build:** a small table — 0 ok, 1 usage, 2 not signed in, 3 browser unreachable, 4 site refused —
-and keep it stable.
-
----
-
-## P2 — capability gaps in the recipe set
-
-Found by generating the playbooks from the registry: several sites claim less than assumed.
-
-- **No reaction recipe exists for any site.** No `linkedin:like`, `x:like`, `x:repost`. I assumed
-  they existed and wrote them into a playbook; they do not. Reacting is the most common low-risk
-  social action and it is entirely missing.
-- **facebook.com, instagram.com, youtube.com are read-only** — one or two read recipes each, no
-  writes. Their `write.md` now says so rather than leaving a gap an agent fills with a guess.
-- **news.ycombinator.com has writes but no read recipe** — it can post and comment but cannot read
-  a thread back, which collides with its own verification rule ("HN serves 200 on a dead post").
-
----
-
-## P3 — operational sharp edges, all hit for real on 2026-08-30/31
-
-- **`up` fails when launched from a background/non-GUI context.** Chromium dies with
-  `bootstrap_look_up … No rendezvous client, terminating process`. Relevant the moment this runs
-  under cron, a daemon, or a headless session.
-- **A killed browser leaves a stale `SingletonLock`**, and the next `up` silently no-ops — the log
-  says `Opening in existing browser session.` and nothing services the spool. Needs detection and
-  a clear message, not silence. (Clearing `Singleton{Lock,Cookie,Socket}` is the fix.)
-- **The ledger and learn dir are global**: `~/.config/chrome-agent/actions.ndjson`, `learn/`, and
-  `/tmp/chrome-agent-cj.err` are shared across profiles with no identity column. Once two profiles
-  are in use — they are — one audit trail cannot say which identity did what.
-- **Spool keying is solved, keep it that way.** Spool and launch log derive from a hash of the full
-  profile path; the default profile keeps its historic paths. Two earlier bugs lived here (a
-  trailing slash forked one profile into two spools; `basename` collided `~/work/profile` with
-  `~/personal/profile`). Any change here needs both cases re-tested.
+- **Stale `SingletonLock`**: `up` now reads the lock's `<host>-<pid>` target, and if no live process
+  owns it clears `Singleton{Lock,Cookie,Socket}` and says so. The failure mode was silence —
+  chromium printed `Opening in existing browser session.`, exited 0, and nothing serviced the spool.
+- **Launch failures are named, not waited out**: `No rendezvous client` (a background/cron/ssh
+  context with no Mach bootstrap) now exits 3 pointing at `launchctl asuser` **or**
+  `CHROMIUM_AGENT_HEADLESS=1`, which the launcher already supports and which is the real answer for
+  cron.
+- **The ledger carries identity**: `actions.ndjson` lines now include `profile` and `agent`. One
+  global file with two profiles in use could not say who posted.
+- Spool keying is unchanged in behaviour but now derives from ONE function (`_spool_for`), so
+  `profile create` reports the spool the next `up` will really use. Both historic bugs re-tested:
+  trailing slash (`~/chrome-agent-profile/` → the default spool) and basename collision
+  (`~/work/profile` ≠ `~/personal/profile`).
 
 ---
 
-## P4 — the playbook system itself
+## Still open
 
-- **`last_verified` is generated, not proven.** It is stamped with the generation date, which says
-  nothing about whether the verbs still work. Build `chrome-agent verify <domain>` — run that site's
-  read recipe, stamp the date on success, and fail loudly rather than silently ageing.
+### P2 — real capability gaps
+
+- **news.ycombinator.com can write but cannot read.** It posts and comments and has no read recipe,
+  which collides with its own verification rule ("HN serves 200 on a dead post — read the item
+  back"). The one gap where a site's traps file demands a verb the site does not have.
+- **facebook.com, instagram.com, youtube.com are read-only.** Their `write.md` now says so rather
+  than leaving a hole an agent fills with a guess.
+- **reddit:listing is broken** (see above). Either fix the recipe or record the trap.
+- **`verify` cannot pass opts**, so a read recipe that needs an argument (`youtube:channel-videos`
+  wants a channel) can only ever report 0 items. Needs a per-site verify fixture — one known-good
+  opts blob per domain — before its `never` means "broken" rather than "unaskable".
+
+### P3 — remaining
+
+- `up` from a truly headless context is *pointed at*, not *proven*. Nobody has run the headless path
+  end to end under cron; do that before promising it.
+
+### P4 — the playbook system
+
 - **No promotion path from learned to canon.** apl ADR-0008 says promotion is deliberate and
-  reviewed, and provides no tooling, so learned notes in `~/.config/chrome-agent/<domain>/` will
-  accumulate true-but-unpromoted knowledge until someone reads them. A `promote` that diffs learned
-  against canon would make that a review rather than an archaeology dig.
-- **Traps are hand-written and survive regeneration only if added to the generator's tables.** That
-  is deliberate — only the verb surface has a source of truth — but it means a trap written directly
-  into a generated file is lost on the next run. Worth a guard.
+  reviewed and ships no tooling, so `~/.config/chrome-agent/<domain>/` accumulates true-but-
+  unpromoted knowledge until someone reads it. A `promote` that diffs learned against canon makes
+  that a review instead of an archaeology dig.
+- **Traps are hand-written and survive regeneration only via the generator's tables.** Deliberate —
+  only the verb surface has a source of truth — but a trap written straight into a generated file is
+  lost on the next run. Worth a guard.
 
 ---
 
 ## What belongs here, and what does not
 
-**Here:** verbs, traps, login procedure, the profile/spool mechanics, the fork dependency, anything
+**Here:** verbs, traps, login procedure, profile/spool mechanics, the fork dependency, anything
 provable by running the browser.
 
 **Not here:** which `browser:<label>` may act on a site. That is a statement about an identity, not
 about the site — apl owns it (`apl identity set browser:<label> --site <domain>`), and playbooks
-deliberately name no identity. A site is reachable as more than one person; the moment a default
-identity lands in a playbook, the multi-identity design silently becomes single-identity.
+name none. A site is reachable as more than one person; the moment a default identity lands in a
+playbook, the multi-identity design silently becomes single-identity. (The generator used to write
+`identity: browser:deemwar` into every `meta.md` — exactly that failure, now removed.)
 
----
+## The apl-facing contract — now filled
 
-## The apl-facing contract, if you build profile + login
+ADR-0007 makes `login` a capability and its table had one blank row for `browser:<label>`. The three
+verbs above fill it with no new concept on apl's side: the browser adapter implements the existing
+`PrepareLogin` interface and `exec`s this CLI, exactly as `apl login whatsapp:biz` execs `wacli
+auth`. And because `login`/`auth` are domain-scoped, `apl login browser:deemwar --site linkedin.com`
+means precisely one thing.
 
-apl already has the slot for this. ADR-0007 makes `login` a capability — "prepare the child process
-that ESTABLISHES the credential" — and its table has one blank row:
-
-| `browser:<label>` | *nothing* — chrome-agent has no sign-in command; apl says so |
-
-Fill that row and apl needs **no new concept**: its browser adapter implements the existing
-`PrepareLogin` interface and `exec`s whatever this CLI exposes, exactly as `apl login whatsapp:biz`
-execs `wacli auth` and lets the QR render in the user's terminal.
-
-Three verbs would close it:
-
-```
-chrome-agent profile create <dir>        # make a profile, do not launch
-chrome-agent login <domain>              # open THIS profile at that site, headful, for a human
-chrome-agent auth  <domain>              # read-only: {signed_in: bool, as?: string}
-```
-
-**`login` must not type anything.** It opens the window and gets out of the way. apl's job is to
-exec it and then verify with `auth` — never to supply a credential. That is ADR-0008's manual-login
-rule, and it is the reason a password never reaches an agent's context.
-
-### One thing ADR-0007 under-specifies, and this is where it shows
-
-`apl login whatsapp:biz` is unambiguous: one account, one pairing. **A browser profile is not signed
-into a thing — it is signed into many sites.** So `apl login browser:deemwar` has no single meaning,
-and the answer has to be per site:
-
-```
-apl login browser:deemwar --site linkedin.com
-```
-
-which implies `login` and `auth` here are **domain-scoped, not profile-scoped**. Build them that way
-from the start; a profile-scoped `signed_in: true` would be a lie the moment one site's cookie
-expires while another's holds — and a green light nobody verified is the failure this whole design
-exists to prevent.
-
-`profile create` is the one that is genuinely profile-scoped. apl should never `mkdir` a profile
-itself: today it reports `dangling` when the directory is missing, and with `profile create` it can
-exec this instead of quietly creating a logged-out profile that looks configured.
+`profile create` is the genuinely profile-scoped one: apl should never `mkdir` a profile itself — a
+bare directory is a logged-out profile that looks configured.
