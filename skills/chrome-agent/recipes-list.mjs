@@ -14,17 +14,10 @@
 //   node recipes-list.mjs            human list (unchanged format)
 //   node recipes-list.mjs --json     [{key, site, verb, describe, write, world, source, cli}]
 
-import os from 'node:os';
-import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { resolveRegistry } from './recipes-path.mjs';
 
-const REGISTRY =
-  process.env.CHROME_AGENT_RECIPES ||
-  path.join(
-    os.homedir(),
-    'muthu/deemwarworkspace/browser-research-workspace/browser-research',
-    'extensions/browser-research/src/recipes/registry.js',
-  );
+const REGISTRY = resolveRegistry();
 
 // chrome-agent's own verbs. They are NOT in the registry — they are DOM actions implemented in
 // the bash CLI, each self-verifying by an attribute flip (aria-label / data-testid / aria-pressed)
@@ -44,6 +37,7 @@ async function load() {
   const out = [];
   let registry = null;
   try {
+    if (!REGISTRY) throw new Error('no recipe registry found (vendor one: chrome-agent recipes vendor)');
     registry = (await import(pathToFileURL(REGISTRY).href)).RECIPES;
   } catch (e) {
     if (process.argv.includes('--json')) {

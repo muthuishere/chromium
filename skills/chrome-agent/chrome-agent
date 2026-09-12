@@ -89,7 +89,24 @@ _launchlog_for(){ local p="${1%/}"
 PROFILE="${PROFILE%/}"
 SPOOL="$(_spool_for "$PROFILE")"
 LAUNCHLOG="$(_launchlog_for "$PROFILE")"
-SKILL="$HOME/.claude/skills/chrome-agent"
+# WHERE THIS SKILL LIVES — derived from the script, never assumed (2026-09-12).
+# This was `$HOME/.claude/skills/chrome-agent`, a path that exists on exactly one machine. Every
+# helper hangs off it (sites.py, recipes-list.mjs, recipe-run.mjs, promote.py, share.sh), so on a
+# server — or under any other user — `sites list`, `recipes --json` and `promote` all died with
+# "No such file or directory". Found by running the selftest inside an Ubuntu container: 6 of 23
+# checks failed, all of them this one line. Same class of bug as the hardcoded FORK, same fix.
+#
+# Resolve symlinks by hand: `readlink -f` is GNU-only and this has to work on macOS too. The CLI is
+# normally reached through a symlink in ~/.local/bin, so resolving is not optional.
+_ca_self="${BASH_SOURCE[0]:-$0}"
+while [ -L "$_ca_self" ]; do
+  _ca_link="$(readlink "$_ca_self")"
+  case "$_ca_link" in
+    /*) _ca_self="$_ca_link" ;;
+    *)  _ca_self="$(dirname "$_ca_self")/$_ca_link" ;;
+  esac
+done
+SKILL="${CHROME_AGENT_SKILL:-$(cd "$(dirname "$_ca_self")" && pwd)}"
 LEARN="$HOME/.config/chrome-agent/learn"
 LEDGER="$HOME/.config/chrome-agent/actions.ndjson"
 # Pure queries must not touch the filesystem. `spool` and `profile` exist so a
@@ -340,7 +357,41 @@ recipe(){  # $1=site:name  $2=opts-json(optional)  $3="csp" to run CSP-safe (opt
 # registry.js to learn the verb list — across a repo boundary, into someone else's source layout,
 # inferring "is this a write?" from the FILE a key lived in. The list lives in recipes-list.mjs
 # now: registry recipes AND chrome-agent's own DOM verbs, each entry naming its own source.
-recipes(){ node "$SKILL/recipes-list.mjs" "${1:-}"; }
+recipes(){ case "${1:-}" in
+  vendor) shift; recipes_vendor "$@" ;;
+  *) node "$SKILL/recipes-list.mjs" "${1:-}" ;;
+esac; }
+
+# recipes vendor — carry the recipe registry with the install (ADR 0004's model, applied to
+# recipes). The registry lives in ANOTHER repo on the owner's machine, so a server that has this
+# skill and not that checkout reports 6 verbs instead of 48 and every `recipe <key>` fails — found
+# by running the CLI in an Ubuntu container. Vendoring copies it to ~/.config/chrome-agent/recipes,
+# which the resolver prefers over the checkout, and which a human can edit when a site moves.
+recipes_vendor(){ local force="" src dst
+  [ "${1:-}" = "--force" ] && force=1
+  src="${CHROME_AGENT_RECIPES_SRC:-$HOME/muthu/deemwarworkspace/browser-research-workspace/browser-research/extensions/browser-research/src/recipes}"
+  dst="$HOME/.config/chrome-agent/recipes"
+  [ -f "$src/registry.js" ] || die "$EX_USAGE" "no-source" "no recipe source at $src — set CHROME_AGENT_RECIPES_SRC to a browser-research recipes dir"
+  if [ -d "$dst" ] && [ -z "$force" ]; then
+    python3 -c 'import json,sys,os;print(json.dumps({"vendored":sys.argv[1],"action":"kept",
+      "note":"already vendored — `recipes vendor --force` replaces it (and discards local edits)"},separators=(",",":")))' "$dst"
+    return 0
+  fi
+  mkdir -p "$dst"
+  # Copy the whole directory: registry.js imports its siblings, so a lone registry is useless.
+  (cd "$src" && tar cf - .) | (cd "$dst" && tar xf -)
+  # The registry is ESM in .js files. In its home repo an ancestor package.json says
+  # {"type":"module"}; vendored on its own it does not, and node reads every .js as CommonJS —
+  # "Cannot use import statement outside a module", which surfaces as "6 verbs instead of 48".
+  # Found in the Ubuntu container, 2026-09-12. The marker travels with the copy.
+  printf '{"type":"module","name":"chrome-agent-vendored-recipes","private":true}\n' > "$dst/package.json"
+  log "recipes:vendor" "$dst" "from $src"
+  CHROME_AGENT_RECIPES="$dst" node "$SKILL/recipes-list.mjs" --json 2>/dev/null | python3 -c 'import json,sys
+try: n=len(json.load(sys.stdin))
+except Exception: n=0
+print(json.dumps({"vendored":sys.argv[1],"from":sys.argv[2],"verbs":n,
+  "note":"this copy now WINS over the development checkout; edit it here when a site moves"},separators=(",",":")))' "$dst" "$src"
+}
 
 # ---- VERIFY-OR-LEARN loop (owner 2026-07-15: "verify always; if not, start learning") -----
 # Run an action, VERIFY its effect actually happened; if verification fails (recipe drifted,
@@ -1127,6 +1178,9 @@ install_(){ local bindir="${1:-$HOME/.local/bin}"
   mkdir -p "$HOME/.config/chrome-agent/sites" "$HOME/.config/chrome-agent/learned" \
            "$HOME/.config/chrome-agent/share" "$bindir"
   python3 "$SITES_PY" sync >/dev/null
+  # Carry the recipes too when a source is reachable. Without this an install on a box that has no
+  # browser-research checkout silently has 6 verbs instead of 48, and every `recipe` call fails.
+  recipes_vendor >/dev/null 2>&1 || true
   # A symlink, not a copy: a copy is a second version of the CLI that ages silently.
   if [ ! -e "$bindir/chrome-agent" ] || [ -L "$bindir/chrome-agent" ]; then
     ln -sf "$CA_SELF" "$bindir/chrome-agent"
@@ -1136,9 +1190,11 @@ sites=sys.argv[2]
 print(json.dumps({"cli":sys.argv[1],"on_path":os.path.join(sys.argv[3],"chrome-agent"),
   "sites_installed":sites,
   "edit_here":"a page changed? edit %s/<domain>.json — it wins over the shipped copy, no redeploy" % sites,
+  "recipes":(sys.argv[5] if os.path.isdir(sys.argv[5]) else "NOT vendored — run `chrome-agent recipes vendor` on a box with a browser-research checkout, or copy ~/.config/chrome-agent/recipes across"),
   "learned":sys.argv[4],
   "next":["chrome-agent doctor","chrome-agent sites list","chrome-agent auth <domain>"]},indent=2))' \
-    "$CA_SELF" "$HOME/.config/chrome-agent/sites" "$bindir" "$HOME/.config/chrome-agent/learned"
+    "$CA_SELF" "$HOME/.config/chrome-agent/sites" "$bindir" "$HOME/.config/chrome-agent/learned" \
+    "$HOME/.config/chrome-agent/recipes"
 }
 
 # ---- verify <domain> — make `last_verified` mean something (2026-09-12) ----------------------
@@ -1253,7 +1309,7 @@ chrome-agent — social READ+WRITE (LinkedIn/X/YouTube/…) over the undetectabl
 It RUNS browser-research's verified recipes through the fork — no per-site reinvention.
 
   up [--headless] [url] | status | goto <url> | shot [path]
-  recipes [--json]                every runnable verb (registry + chrome-agent's own), --json for tools
+  recipes [--json] | recipes vendor [--force]   every runnable verb; vendor carries the registry
   recipe <site:name> [opts-json]  run ANY recipe through the fork (general, all sites)
   evalAsync '<async-js>'          run any promise-returning JS and get the result
 
@@ -1323,7 +1379,7 @@ case "${1:-}" in
       *) die "$EX_USAGE" "usage" "sites list|show <domain>|path <domain>|validate|sync [--force]";; esac;;
   exit-codes|exitcodes) exit_codes "${2:-}";;
   up) shift; up "${1:-}" "${2:-}";; status) status;; goto) goto "${2:-}";; shot) shot "${2:-}";;
-  recipes) recipes "${2:-}";; recipe) recipe "${2:-}" "${3:-}" "${4:-}";; evalasync|evalAsync) evalAsync "${2:-}" "${3:-20}";;
+  recipes) shift; recipes "${1:-}" "${2:-}";; recipe) recipe "${2:-}" "${3:-}" "${4:-}";; evalasync|evalAsync) evalAsync "${2:-}" "${3:-20}";;
   evalwithcsp) evalwithcsp "${2:-}" "${3:-20}";; evalwithoutcsp) evalwithoutcsp "${2:-}" "${3:-20}";;
   do) do_verify "${2:-}" "${3:-}" "${4:-}";;
   capture) shift; capture "${1:-}";; learn) learn "${2:-cap}" "${3:-}";;

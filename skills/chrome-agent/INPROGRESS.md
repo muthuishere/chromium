@@ -309,11 +309,41 @@ never deletes a real profile: the logout and read paths run against a synthetic 
 definition in a temp dir, because proving a code path should not cost the owner a session.
 28 pass, 0 fail.
 
+### Ubuntu, in a container — and it found three real bugs
+
+The installer and the CLI were run against **real Ubuntu 24.04** in Docker (no server touched, no
+prod involved). `server-install.sh` installed node 18, python3.12, Xvfb, x11vnc, websockify, noVNC
+and cloudflared 2026.9.1, and its preflight correctly reported the only thing missing: a Linux fork
+binary. Then the CLI itself was run there, and three things broke that would have broken on the
+first real deploy:
+
+1. **`SKILL` was hardcoded to `$HOME/.claude/skills/chrome-agent`** — a path that exists on exactly
+   one machine. Every helper hangs off it, so `sites list`, `recipes --json` and `promote` all died
+   with "No such file or directory": **6 of 23 selftest checks failed, all from one line.** Same
+   class as the hardcoded `FORK`, same fix — the script now resolves its own location through
+   symlinks (by hand: `readlink -f` is GNU-only and this has to work on macOS too).
+2. **The recipe registry path was hardcoded to the owner's browser-research checkout**, in two
+   files, under two different env var names. A server without that checkout silently reported
+   **6 verbs instead of 48** and every `recipe <key>` failed. There is now one resolver
+   (`recipes-path.mjs`) and `chrome-agent recipes vendor`, which carries the registry into
+   `~/.config/chrome-agent/recipes` — the same installed-copy-wins model as the site definitions,
+   and `install` does it automatically.
+3. **The vendored registry is ESM in `.js` files.** In its home repo an ancestor `package.json`
+   says `{"type":"module"}`; vendored alone it does not, so node read every file as CommonJS
+   ("Cannot use import statement outside a module") — which surfaces as "6 verbs" again, with a
+   completely different cause. The marker now travels with the copy.
+
+After all three: **23/23 selftest on Ubuntu, 48 verbs from the vendored copy with no
+browser-research checkout on the box, and a real recipe payload builds.** What is still untested on
+Linux is exactly what needs a Chromium build: the browser itself.
+
 ---
 
 ## Still open
 
-- **Nothing here has run on Ubuntu** — and that is now the single blocking item for ADR 0003. `scripts/server-install.sh` and `docs/server-ubuntu.md` exist
+- **The fork has never been built or run on Linux.** The CLI, the installer and the vendored
+  recipes are now proven on Ubuntu 24.04; the browser is not. That needs a Linux build (~100 GB,
+  hours) or a Linux CI artifact — a macOS build cannot be copied across. `scripts/server-install.sh` and `docs/server-ubuntu.md` exist
   and are statically clean; the fork has never been built or started on Linux from this repo. Until
   it is, ADR 0003 is macOS-only in fact and Linux-only in intent.
 - **The share's X half is the next thing to prove**: a human logging in through noVNC on a virtual

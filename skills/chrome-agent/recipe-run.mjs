@@ -10,11 +10,15 @@
 // usage: node recipe-run.mjs <site:name> <token> [opts-json]
 //   prints the JS to inject; the wrapper fires it then polls window[token].
 import { pathToFileURL } from "node:url";
+import { resolveRegistry } from "./recipes-path.mjs";
 
-const REG =
-  process.env.BR_REGISTRY ||
-  process.env.HOME +
-    "/muthu/deemwarworkspace/browser-research-workspace/browser-research/extensions/browser-research/src/recipes/registry.js";
+// One resolver for both entry points: $CHROME_AGENT_RECIPES / $BR_REGISTRY, then the vendored copy
+// in ~/.config/chrome-agent/recipes, then the owner's checkout. See recipes-path.mjs.
+const REG = resolveRegistry();
+if (!REG) {
+  console.error("no recipe registry found — vendor one: chrome-agent recipes vendor");
+  process.exit(3);
+}
 
 const [, , key, token, optsJson] = process.argv;
 if (!key || !token) {
