@@ -449,12 +449,79 @@ the capture waiting for a visible surface.
 | `PLAYWAV:<path>`         | One-shot: decodes a 16-bit PCM WAV and pushes it into the fake mic   |
 | `VIDEOSTART:<port>`      | Boots the `/cam` WebSocket on `127.0.0.1:<port>`, arms the camera bridge |
 | `VIDEOSTOP`             | Tears the camera server down, disarms + flushes the frame            |
+| `VERSION:<id>`           | Handshake. Acks `{"ok":true,"protocol":1,"engine_version","chromium_version","capabilities":[...]}`. Answered before any tab/profile lookup, so it cannot be dropped |
+| `COOKIEEXPORT:<id>\|<domain>` | Every cookie in scope for `<domain>` (label-boundary suffix match), HttpOnly included. Acks `{"ok":true,"domain","count","http_only_count","protocol","cookies":[...]}`. No domain = `{"ok":false,"error":...}` refusal. TAB:-prefixable (picks the profile) |
+| `COOKIEIMPORT:<id>\|<json>` | Sets each cookie from `[...]` or `{"cookies":[...]}`. Acks `{"ok":true,"imported","rejected_count","rejected":[{"name","domain","reason"}]}` — refusals are REPORTED, never swallowed |
 | *(bare line)*            | Treated as `TEXT:`                                                  |
 
 Constraints: `\n` is always the file's line separator; files must be
 published via atomic rename, never appended to directly inside the watched
 directory; delivery is at-most-once (file is deleted before its lines are
 dispatched); `KEY:` supports one chord per line, no multi-chord sequences.
+
+## Extension: VERSION handshake, instance registry, cookie export/import (ADR 0009 §2/§6, ADR 0011)
+
+### `VERSION:<id>`
+Acks on `results/<id>.json`:
+```json
+{"ok":true,"protocol":1,"engine_version":"0.3.0","chromium_version":"<milestone>",
+ "capabilities":["version","text","key","click","goto","tabid","tabs","screenshot","eval",
+   "evalasync","evalasync_b64","waitfor","netlog","audio_in","audio_out","video_in",
+   "cookies","cookie_export","cookie_import","instances"]}
+```
+Dispatched FIRST, before the tab lookup. An engine that predates this verb types it as text
+into the active tab and never acks: a client must treat a VERSION timeout as "engine older
+than protocol 1", not as "browser dead" (check pid liveness via the registry to tell them apart).
+
+### Instance registry
+On watcher start (watcher thread, not UI thread) the engine writes
+`~/.config/chromium-agent/instances/<pid>.json`:
+```json
+{"id":"<pid>","pid":12345,"profile":"<resolved user-data-dir>","spool":"<CHROMIUM_SENDKEYS_DIR>",
+ "headless":false,"started_at":"2026-09-13T10:00:00.000Z","protocol":1,"engine_version":"0.3.0"}
+```
+Removed when the watcher thread exits (clean shutdown). Named by pid so a crash leaves one
+corpse per pid rather than an unbounded pile. `ws_port` is omitted: there is no WS control plane yet.
+Only written when `CHROMIUM_SENDKEYS_DIR` is set and exists (the watcher is off otherwise).
+
+### `COOKIEEXPORT:<id>|<domain>`
+Reads the network-service cookie store (`StoragePartition::GetCookieManagerForBrowserProcess()
+->GetAllCookies()`), NOT `GetCookieList(url)` (that applies send-time path/scheme/SameSite
+rules and returns a subset). `<domain>` may be `linkedin.com`, `.linkedin.com` or a URL; it is
+normalised to a bare lowercase host. Scope: exact host, or any subdomain on a label boundary
+(`evil-linkedin.com` is out of scope). Each cookie:
+```json
+{"name","value","domain","path","secure","http_only","same_site":"None|Lax|Strict|Unspecified",
+ "priority":"low|medium|high","session":bool,"expires":<seconds float, 0=session>,
+ "expires_ms":"<int64 ms str, ''=session>","creation_ms","last_access_ms","last_update_ms",
+ "source_scheme":"secure|nonsecure|unset","source_port":int,
+ "partition_key":{"top_level_site","has_cross_site_ancestor"}   // only if partitioned
+ "partition_key_unserializable":"<why>"}                        // opaque/nonced keys
+```
+The engine logs counts and the domain only — never a name or value. The result file is
+plaintext in the spool: encryption-at-rest (ADR 0011 §3) is the client's job.
+
+### `COOKIEIMPORT:<id>|<json>`
+`<json>` is the cookie array or the whole export ack. Each entry goes through
+`CanonicalCookie::CreateSanitizedCookie` then `SetCanonicalCookie(source, MakeAllInclusive())`
+with `source = (secure ? https : http)://<domain sans dot><path>`. Times prefer `*_ms`, fall back
+to `expires` seconds. Ack:
+```json
+{"ok":true,"imported":N,"rejected_count":M,"rejected":[{"name","domain","reason"}]}
+```
+`reason` is `missing required field…`, `invalid partition key: …`, `not canonical: <exclusion
+reasons>` or `store refused: <exclusion reasons>` — a decision, never a value. `ok:true` means the
+verb ran; the caller MUST check `rejected_count`. Parse/structure errors ack
+`{"ok":false,"error":...}`.
+
+### No-tab acks
+Any acking verb (EVAL, EVALASYNC, LISTTABS, WAITFOR, NEWTAB/SCREENSHOT id-forms, COOKIE*) that
+arrives with no active tab now acks `{"ok":false,"error":"no active tab"}` instead of being
+dropped. `TAB:<unknown>|EVALASYNC:…` and `…|SCREENSHOT:<id>|…` now ack `unknown tabId` too
+(previously they were missing from `MaybeResultIdFor` and hung).
+The two warning paths that log a raw spool line (no tab, malformed `TAB:`) pass it through
+`RedactLineForLog`, which replaces a COOKIEIMPORT/COOKIEEXPORT payload with `<redacted>` — before
+this, a failed import would have written the whole jar into the browser log.
 
 ## Known gotchas / limitations
 

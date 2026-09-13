@@ -21,8 +21,10 @@
 #include "base/values.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/weak_document_ptr.h"
+#include "services/network/public/mojom/cookie_manager.mojom-forward.h"
 
 namespace content {
+class BrowserContext;
 class RenderFrameHost;
 class WebContents;
 }
@@ -143,6 +145,49 @@ class SendKeysWatcher {
   void InjectNetLogStop(const std::string& out_path);
 
   void WriteResultFile(const std::string& id, base::DictValue result);
+
+  // VERSION:<id> -- acks {ok, protocol, engine_version, chromium_version,
+  // capabilities:[...]} on results/<id>.json. Handled before any tab lookup and
+  // before any profile is resolved, because the whole point is that a client
+  // newer than its engine must get an ANSWER: ADR 0006/0009 name the current
+  // failure mode as a command that hangs forever, which is the worst error a
+  // system can give. A capability is listed only when this build actually
+  // implements the verb behind it.
+  void InjectVersion(const std::string& id);
+
+  // Instance registry (ADR 0009 SS2). "Find the browser" is currently
+  // arithmetic on the profile path -- hash it, derive the spool -- and that
+  // arithmetic produced two production bugs (a trailing slash forked one
+  // profile into two spools; a basename collision merged two profiles onto
+  // one). The engine records what it actually started in
+  // ~/.config/chromium-agent/instances/<pid>.json and removes it on clean exit;
+  // a caller decides staleness by pid liveness. Both run on the watcher thread
+  // (blocking file I/O, forbidden on the UI thread).
+  void WriteInstanceFile();
+  void RemoveInstanceFile();
+
+  // COOKIEEXPORT:<id>|<domain> -- reads the NETWORK SERVICE cookie store for
+  // every cookie in scope for <domain> and acks the full set on
+  // results/<id>.json. It has to live in the engine: the cookies that carry a
+  // session (li_at, auth_token, sessionid) are HttpOnly, so a page-eval export
+  // would ship the worthless half and look successful (ADR 0011 SS1). A bare
+  // export with no domain is a refusal (SS2). No cookie VALUE is ever logged.
+  void InjectCookieExport(content::BrowserContext* context,
+                          const std::string& spec);
+
+  // COOKIEIMPORT:<id>|<json> -- sets each cookie in <json> (the array
+  // COOKIEEXPORT produced, or an object carrying it under "cookies") into the
+  // store, and acks {imported, rejected:[{name,domain,reason}]}. Reporting the
+  // rejections is the whole contract: a browser silently drops cookies it
+  // dislikes, and "imported 47" while 12 were refused is a broken session with
+  // a green light (ADR 0011 SS5).
+  void InjectCookieImport(content::BrowserContext* context,
+                          const std::string& spec);
+
+  // Resolves the network service CookieManager for |context|'s default storage
+  // partition. Null only if the context is gone.
+  network::mojom::CookieManager* GetCookieManager(
+      content::BrowserContext* context);
 
   // Tab / window management on the last-active browser window. NEWTAB/NEWWINDOW
   // open |url| (blank if empty); CLOSETAB/SELECTTAB act on |index_str| (the

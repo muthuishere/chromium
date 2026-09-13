@@ -13,7 +13,14 @@
 
 #include "base/containers/span.h"
 #include "base/base64.h"
+#include "base/command_line.h"
 #include "base/environment.h"
+#include "base/json/json_reader.h"
+#include "base/memory/ref_counted.h"
+#include "base/path_service.h"
+#include "base/process/process_handle.h"
+#include "base/strings/stringprintf.h"
+#include "base/version_info/version_info.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -43,6 +50,8 @@
 #include "components/input/native_web_keyboard_event.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "components/tabs/public/tab_interface.h"
+#include "chrome/common/chrome_paths.h"
+#include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/global_request_id.h"
 #include "content/public/browser/navigation_controller.h"
@@ -50,6 +59,7 @@
 #include "content/public/browser/render_widget_host_observer.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/isolated_world_ids.h"
 #include "base/numerics/byte_conversions.h"
@@ -59,12 +69,19 @@
 #include "media/base/audio_bus.h"
 #include "media/capture/video/agent_video_bridge.h"
 #include "net/base/ip_endpoint.h"
+#include "net/cookies/canonical_cookie.h"
+#include "net/cookies/cookie_access_result.h"
+#include "net/cookies/cookie_constants.h"
+#include "net/cookies/cookie_inclusion_status.h"
+#include "net/cookies/cookie_options.h"
+#include "net/cookies/cookie_partition_key.h"
 #include "net/base/net_errors.h"
 #include "net/log/net_log_source.h"
 #include "net/server/http_server.h"
 #include "net/server/http_server_request_info.h"
 #include "net/socket/tcp_server_socket.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
+#include "services/network/public/mojom/cookie_manager.mojom.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 #include "ui/base/page_transition_types.h"
@@ -315,32 +332,6 @@ const std::string& GetOrCreateTabId(content::WebContents* wc) {
   return data->id;
 }
 
-// The results/<id>.json id the client will poll for a given inner command line,
-// so an unknown-tabId failure can be reported instead of hanging the client on a
-// result file that never appears. Empty when the command writes no result file.
-std::string MaybeResultIdFor(const std::string& line) {
-  std::string rest;
-  if (ConsumePrefix(line, "NEWTAB:", &rest)) {
-    // NEWTAB acks only when given a "<resultId>|<url>" form.
-    size_t bar = rest.find('|');
-    return bar == std::string::npos ? std::string() : rest.substr(0, bar);
-  }
-  if (ConsumePrefix(line, "EVAL:", &rest) ||
-      ConsumePrefix(line, "LISTTABS:", &rest)) {
-    return rest.substr(0, rest.find('|'));  // id is the first field.
-  }
-  if (ConsumePrefix(line, "WAITFOR:", &rest)) {
-    // WAITFOR:<timeout>|<id>|<js> -- id is the second field.
-    size_t first = rest.find('|');
-    if (first == std::string::npos) {
-      return std::string();
-    }
-    std::string after = rest.substr(first + 1);
-    return after.substr(0, after.find('|'));
-  }
-  return std::string();
-}
-
 // Splits on the first occurrence of `sep` only -- EVAL/WAITFOR payloads are
 // JavaScript and may contain '|' themselves, so a full SplitString would
 // mangle them.
@@ -357,7 +348,276 @@ bool SplitOnFirst(const std::string& s,
   return true;
 }
 
+// UTC ISO-8601, with no dependency on base/i18n. Used for `started_at` in the
+// instance registry, which a human reads and a client only echoes.
+std::string ToIso8601Utc(base::Time t) {
+  base::Time::Exploded e;
+  t.UTCExplode(&e);
+  return base::StringPrintf("%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", e.year,
+                            e.month, e.day_of_month, e.hour, e.minute,
+                            e.second, e.millisecond);
+}
+
+// int64 milliseconds since the Unix epoch, as a STRING. JSON numbers are
+// doubles and a cookie timestamp in microseconds does not survive one; a string
+// round-trips exactly. A null base::Time (a session cookie's expiry) becomes "".
+std::string TimeToMsString(base::Time t) {
+  if (t.is_null()) {
+    return std::string();
+  }
+  return base::NumberToString(t.InMillisecondsSinceUnixEpoch());
+}
+
+base::Time MsStringToTime(const std::string* s) {
+  int64_t ms = 0;
+  if (!s || s->empty() || !base::StringToInt64(*s, &ms)) {
+    return base::Time();
+  }
+  return base::Time::FromMillisecondsSinceUnixEpoch(ms);
+}
+
+// One exported cookie. EVERY attribute that decides whether a session works has
+// to be here -- Secure, HttpOnly, SameSite, Path, Domain, expiry and the
+// partition key -- because an import that drops one of them produces a jar that
+// looks complete and authenticates as nobody (ADR 0011 SS5).
+//
+// The VALUE is in this structure, because the value IS the point of the export.
+// It is never logged; see the LOG lines in InjectCookieExport/Import, which
+// carry counts and domains only.
+base::DictValue CookieToDict(const net::CanonicalCookie& c) {
+  base::DictValue d;
+  d.Set("name", c.Name());
+  d.Set("value", c.Value());
+  d.Set("domain", c.Domain());
+  d.Set("path", c.Path());
+  d.Set("secure", c.SecureAttribute());
+  d.Set("http_only", c.IsHttpOnly());
+  d.Set("same_site", net::CookieSameSiteToString(c.SameSite()));
+  d.Set("priority", net::CookiePriorityToString(c.Priority()));
+  d.Set("session", !c.IsPersistent());
+  // Interop field (seconds since epoch, as every JS cookie jar spells it) plus
+  // the lossless millisecond strings this engine reads back on import.
+  d.Set("expires", c.ExpiryDate().is_null()
+                       ? 0.0
+                       : c.ExpiryDate().InSecondsFSinceUnixEpoch());
+  d.Set("expires_ms", TimeToMsString(c.ExpiryDate()));
+  d.Set("creation_ms", TimeToMsString(c.CreationDate()));
+  d.Set("last_access_ms", TimeToMsString(c.LastAccessDate()));
+  d.Set("last_update_ms", TimeToMsString(c.LastUpdateDate()));
+  d.Set("source_scheme",
+        c.SourceScheme() == net::CookieSourceScheme::kSecure
+            ? "secure"
+            : (c.SourceScheme() == net::CookieSourceScheme::kNonSecure
+                   ? "nonsecure"
+                   : "unset"));
+  d.Set("source_port", c.SourcePort());
+  // A partitioned cookie imported without its key is a DIFFERENT cookie that
+  // the site will never send, so the key round-trips or the entry says why it
+  // could not (opaque origins and nonced keys are deliberately unserializable).
+  if (c.IsPartitioned()) {
+    auto serialized = net::CookiePartitionKey::Serialize(c.PartitionKey());
+    if (serialized.has_value()) {
+      base::DictValue pk;
+      pk.Set("top_level_site", serialized->TopLevelSite());
+      pk.Set("has_cross_site_ancestor",
+             serialized->has_cross_site_ancestor());
+      d.Set("partition_key", std::move(pk));
+    } else {
+      d.Set("partition_key_unserializable", serialized.error());
+    }
+  }
+  return d;
+}
+
+// Accumulates one COOKIEIMPORT across N asynchronous SetCanonicalCookie acks.
+// Refcounted so the last callback to land writes the result, whatever order the
+// mojo replies arrive in.
+class CookieImportState : public base::RefCounted<CookieImportState> {
+ public:
+  explicit CookieImportState(std::string id) : id_(std::move(id)) {}
+
+  const std::string& id() const { return id_; }
+  void AddImported() { ++imported_; }
+  // NOTE: `reason` must never contain a cookie value. Callers pass a
+  // CookieInclusionStatus debug string or a fixed parse error, both of which
+  // describe the DECISION, not the data.
+  void AddRejected(const std::string& name,
+                   const std::string& domain,
+                   const std::string& reason) {
+    base::DictValue r;
+    r.Set("name", name);
+    r.Set("domain", domain);
+    r.Set("reason", reason);
+    rejected_.Append(std::move(r));
+  }
+  void AddPending() { ++pending_; }
+  // Returns the finished result when the last outstanding write lands.
+  std::optional<base::DictValue> ReleasePending() {
+    if (--pending_ > 0) {
+      return std::nullopt;
+    }
+    base::DictValue out;
+    out.Set("ok", true);
+    out.Set("imported", imported_);
+    out.Set("rejected_count", static_cast<int>(rejected_.size()));
+    out.Set("rejected", std::move(rejected_));
+    return out;
+  }
+
+ private:
+  friend class base::RefCounted<CookieImportState>;
+  ~CookieImportState() = default;
+
+  std::string id_;
+  int pending_ = 1;  // guard, released once every cookie has been dispatched
+  int imported_ = 0;
+  base::ListValue rejected_;
+};
+
 }  // namespace
+
+namespace internal {
+
+std::string MaybeResultIdFor(const std::string& line) {
+  std::string rest;
+  if (ConsumePrefix(line, "NEWTAB:", &rest) ||
+      ConsumePrefix(line, "SCREENSHOT:", &rest)) {
+    // Both ack only in their "<resultId>|<arg>" form; the bare form is
+    // fire-and-forget and has nothing to hang on.
+    size_t bar = rest.find('|');
+    return bar == std::string::npos ? std::string() : rest.substr(0, bar);
+  }
+  if (ConsumePrefix(line, "EVALASYNC:", &rest) ||
+      ConsumePrefix(line, "EVAL:", &rest) ||
+      ConsumePrefix(line, "LISTTABS:", &rest) ||
+      ConsumePrefix(line, "VERSION:", &rest) ||
+      ConsumePrefix(line, "COOKIEEXPORT:", &rest) ||
+      ConsumePrefix(line, "COOKIEIMPORT:", &rest)) {
+    return rest.substr(0, rest.find('|'));  // id is the first field.
+  }
+  if (ConsumePrefix(line, "WAITFOR:", &rest)) {
+    // WAITFOR:<timeout>|<id>|<js> -- id is the second field.
+    size_t first = rest.find('|');
+    if (first == std::string::npos) {
+      return std::string();
+    }
+    std::string after = rest.substr(first + 1);
+    return after.substr(0, after.find('|'));
+  }
+  return std::string();
+}
+
+namespace {
+
+// Shared shape for "<id>|<arg>" verbs. `require_arg` decides whether an absent
+// or empty argument is a refusal (COOKIEEXPORT's domain) -- the id is still
+// returned either way, because a refusal that cannot be delivered is a hang.
+ParsedIdArg ParseIdArg(const std::string& spec,
+                       bool require_arg,
+                       const char* missing_arg_error) {
+  ParsedIdArg out;
+  size_t bar = spec.find('|');
+  out.id = spec.substr(0, bar == std::string::npos ? spec.size() : bar);
+  if (out.id.empty()) {
+    out.error = "missing result id";
+    return out;
+  }
+  if (bar != std::string::npos) {
+    out.arg = spec.substr(bar + 1);
+  }
+  base::TrimWhitespaceASCII(out.arg, base::TRIM_ALL, &out.arg);
+  if (require_arg && out.arg.empty()) {
+    out.error = missing_arg_error;
+    return out;
+  }
+  out.ok = true;
+  return out;
+}
+
+}  // namespace
+
+ParsedIdArg ParseCookieExport(const std::string& spec) {
+  // ADR 0011 SS2: a bare export is a refusal, not a convenience. The whole jar
+  // is every identity at once and must be named, never defaulted into.
+  ParsedIdArg out = ParseIdArg(
+      spec, /*require_arg=*/true,
+      "COOKIEEXPORT requires a domain: COOKIEEXPORT:<id>|<domain>");
+  if (!out.ok) {
+    return out;
+  }
+  // Accept "https://linkedin.com/" and ".linkedin.com" as well as the bare
+  // host, then normalise to a bare lowercase host with no leading dot.
+  std::string domain = base::ToLowerASCII(out.arg);
+  for (std::string_view scheme : {"https://", "http://"}) {
+    if (domain.compare(0, scheme.size(), scheme) == 0) {
+      domain = domain.substr(scheme.size());
+      break;
+    }
+  }
+  size_t slash = domain.find('/');
+  if (slash != std::string::npos) {
+    domain = domain.substr(0, slash);
+  }
+  while (!domain.empty() && domain.front() == '.') {
+    domain = domain.substr(1);
+  }
+  if (domain.empty() || domain.find(' ') != std::string::npos) {
+    out.ok = false;
+    out.error = "invalid domain";
+    return out;
+  }
+  out.arg = domain;
+  return out;
+}
+
+ParsedIdArg ParseCookieImport(const std::string& spec) {
+  return ParseIdArg(spec, /*require_arg=*/true,
+                    "COOKIEIMPORT requires a JSON payload: "
+                    "COOKIEIMPORT:<id>|<json>");
+}
+
+bool CookieDomainInScope(const std::string& cookie_domain,
+                         const std::string& requested) {
+  std::string have = base::ToLowerASCII(cookie_domain);
+  std::string want = base::ToLowerASCII(requested);
+  while (!have.empty() && have.front() == '.') {
+    have = have.substr(1);
+  }
+  while (!want.empty() && want.front() == '.') {
+    want = want.substr(1);
+  }
+  if (have.empty() || want.empty()) {
+    return false;
+  }
+  if (have == want) {
+    return true;
+  }
+  // Suffix match on a LABEL boundary only. Without the '.' check,
+  // "evil-linkedin.com" would export as part of "linkedin.com".
+  return have.size() > want.size() &&
+         have.compare(have.size() - want.size(), want.size(), want) == 0 &&
+         have[have.size() - want.size() - 1] == '.';
+}
+
+std::string RedactLineForLog(const std::string& line) {
+  // A cookie verb's payload is a credential. Everything that logs a raw spool
+  // line goes through here, so an import that fails early (no tab, bad TAB:
+  // prefix) cannot write the jar into the log it failed in.
+  for (std::string_view verb : {"COOKIEIMPORT:", "COOKIEEXPORT:"}) {
+    size_t at = line.find(verb);
+    if (at == std::string::npos) {
+      continue;
+    }
+    size_t bar = line.find('|', at + verb.size());
+    if (bar == std::string::npos) {
+      return line;  // no payload to leak
+    }
+    return line.substr(0, bar + 1) + "<redacted>";
+  }
+  return line;
+}
+
+}  // namespace internal
 
 // Logs every mouse/keyboard event that reaches the target widget, whether it
 // came from this watcher's injections or a real user action -- the
@@ -725,11 +985,17 @@ void SendKeysWatcher::Stop() {
 }
 
 void SendKeysWatcher::WatcherThreadMain() {
+  // Registered from THIS thread, not from Start(): the registry write is
+  // blocking file I/O and Start() runs on the UI thread (PostBrowserStart),
+  // where blocking is forbidden. The pairing is exact -- Stop() joins this
+  // thread, so the corpse is removed before the process leaves.
+  WriteInstanceFile();
   while (!stop_requested_.load()) {
     if (!DrainOnce()) {
       base::PlatformThread::Sleep(kPollInterval);
     }
   }
+  RemoveInstanceFile();
 }
 
 bool SendKeysWatcher::DrainOnce() {
@@ -913,6 +1179,18 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     return;
   }
 
+  // VERSION is answered before ANYTHING else -- before the tab lookup, before a
+  // profile is resolved, before a single capability is consulted. A client that
+  // is newer than its engine finds out by sending something this build has
+  // never heard of, and today that is discovered as a command that hangs
+  // forever (ADR 0006, ADR 0009 SS6). The handshake is worthless if it can be
+  // dropped for the same reasons the verbs it describes can be.
+  std::string version_id;
+  if (ConsumePrefix(line, "VERSION:", &version_id)) {
+    InjectVersion(version_id);
+    return;
+  }
+
   // Audio bridge commands act on the process-global mic bridge, not a tab, so
   // handle them before the active-tab lookup below (which would drop them when
   // no tab is focused).
@@ -959,7 +1237,8 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
   if (ConsumePrefix(line, "TAB:", &after_tab)) {
     size_t bar = after_tab.find('|');
     if (bar == std::string::npos) {
-      LOG(WARNING) << "sendkeys: TAB: missing '|' in '" << line << "'";
+      LOG(WARNING) << "sendkeys: TAB: missing '|' in '"
+                   << internal::RedactLineForLog(line) << "'";
       return;
     }
     std::string tab_id = after_tab.substr(0, bar);
@@ -968,7 +1247,7 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     if (!contents) {
       LOG(WARNING) << "sendkeys: TAB: unknown tabId '" << tab_id
                    << "' (tab closed or fork restarted)";
-      std::string result_id = MaybeResultIdFor(line);
+      std::string result_id = internal::MaybeResultIdFor(line);
       if (!result_id.empty()) {
         base::DictValue err;
         err.Set("ok", false);
@@ -981,7 +1260,18 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     contents = GetTargetWebContents();
   }
   if (!contents) {
-    LOG(WARNING) << "sendkeys: no active tab, dropping line: " << line;
+    LOG(WARNING) << "sendkeys: no active tab, dropping line: "
+                 << internal::RedactLineForLog(line);
+    // An acking verb that vanishes here is a client blocked on a result file
+    // that will never appear. Same failure the VERSION verb exists to kill, so
+    // it is refused here too rather than dropped.
+    std::string result_id = internal::MaybeResultIdFor(line);
+    if (!result_id.empty()) {
+      base::DictValue err;
+      err.Set("ok", false);
+      err.Set("error", "no active tab");
+      WriteResultFile(result_id, std::move(err));
+    }
     return;
   }
   content::RenderWidgetHost* rwh =
@@ -1009,6 +1299,15 @@ void SendKeysWatcher::DispatchLineOnUIThread(std::string line) {
     InjectEval(contents->GetPrimaryMainFrame(), rest);
   } else if (ConsumePrefix(line, "WAITFOR:", &rest)) {
     InjectWaitFor(contents->GetPrimaryMainFrame(), rest);
+  } else if (ConsumePrefix(line, "COOKIEEXPORT:", &rest)) {
+    // The cookie store belongs to the PROFILE, not the tab; the tab only tells
+    // us which profile. TAB:<id>|COOKIEEXPORT:... therefore works and pins the
+    // export to that tab's profile, which is what a multi-profile caller wants.
+    InjectCookieExport(contents->GetBrowserContext(), rest);
+    return;
+  } else if (ConsumePrefix(line, "COOKIEIMPORT:", &rest)) {
+    InjectCookieImport(contents->GetBrowserContext(), rest);
+    return;
   } else if (ConsumePrefix(line, "NETLOG:", &rest)) {
     std::string netlog_arg;
     if (rest == "START") {
@@ -1421,6 +1720,353 @@ void SendKeysWatcher::WriteResultFile(const std::string& id,
             base::WriteFile(path, data);
           },
           std::move(out), std::move(*json)));
+}
+
+// ---------------------------------------------------------------------------
+// VERSION -- the handshake (ADR 0009 SS6)
+// ---------------------------------------------------------------------------
+
+void SendKeysWatcher::InjectVersion(const std::string& id) {
+  if (id.empty()) {
+    LOG(WARNING) << "sendkeys: VERSION without a result id";
+    return;
+  }
+  base::DictValue result;
+  result.Set("ok", true);
+  result.Set("protocol", internal::kAgentProtocolVersion);
+  result.Set("engine_version", internal::kAgentEngineVersion);
+  result.Set("chromium_version",
+             std::string(version_info::GetVersionNumber()));
+
+  // Every entry here is a verb this build actually dispatches. The list is the
+  // contract a newer client checks BEFORE sending something the engine has
+  // never heard of -- which today is discovered as a command that hangs
+  // forever, and a hang is the worst error a system can give because it looks
+  // like work in progress. Adding a capability string without the verb behind
+  // it converts a clean refusal back into that hang, so this list is edited in
+  // the same change as the dispatch, never ahead of it.
+  base::ListValue caps;
+  for (const char* cap :
+       {"version", "text", "key", "click", "goto", "tabid", "tabs",
+        "screenshot", "eval", "evalasync", "evalasync_b64", "waitfor",
+        "netlog", "audio_in", "audio_out", "video_in", "cookies",
+        "cookie_export", "cookie_import", "instances"}) {
+    caps.Append(cap);
+  }
+  result.Set("capabilities", std::move(caps));
+  WriteResultFile(id, std::move(result));
+}
+
+// ---------------------------------------------------------------------------
+// Instance registry (ADR 0009 SS2)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+base::FilePath InstanceFilePathForThisProcess() {
+  base::FilePath home;
+  if (!base::PathService::Get(base::DIR_HOME, &home) || home.empty()) {
+    return base::FilePath();
+  }
+  // The file is named by pid, not by a fresh uuid, on purpose: a crashed
+  // browser leaves exactly one corpse per pid instead of an unbounded pile of
+  // uuid files nobody ever collects, and the next launch that reuses the slot
+  // overwrites it. Liveness is still decided by asking the OS about the pid --
+  // the same check that caught the dead SingletonLock, whose symlink target
+  // never exists so an -e test reported "free" while a browser was running.
+  return home.Append(FILE_PATH_LITERAL(".config"))
+      .Append(FILE_PATH_LITERAL("chromium-agent"))
+      .Append(FILE_PATH_LITERAL("instances"))
+      .Append(base::FilePath::FromASCII(
+          base::NumberToString(base::GetCurrentProcId()) + ".json"));
+}
+
+}  // namespace
+
+void SendKeysWatcher::WriteInstanceFile() {
+  base::FilePath path = InstanceFilePathForThisProcess();
+  if (path.empty()) {
+    LOG(WARNING) << "sendkeys: no home directory; not registering this "
+                    "instance";
+    return;
+  }
+  base::FilePath profile;
+  base::PathService::Get(chrome::DIR_USER_DATA, &profile);
+
+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+
+  base::DictValue d;
+  d.Set("id", base::NumberToString(base::GetCurrentProcId()));
+  d.Set("pid", static_cast<int>(base::GetCurrentProcId()));
+  d.Set("profile", profile.AsUTF8Unsafe());
+  d.Set("spool", spool_dir_.AsUTF8Unsafe());
+  d.Set("headless", cmd->HasSwitch("headless"));
+  d.Set("started_at", ToIso8601Utc(base::Time::Now()));
+  d.Set("protocol", internal::kAgentProtocolVersion);
+  d.Set("engine_version", internal::kAgentEngineVersion);
+
+  std::optional<std::string> json = base::WriteJson(d);
+  if (!json) {
+    return;
+  }
+  // Runs on the watcher thread, where blocking I/O is allowed. Deliberately not
+  // on the UI thread: Start() is called from PostBrowserStart().
+  base::CreateDirectory(path.DirName());
+  if (!base::WriteFile(path, *json)) {
+    LOG(WARNING) << "sendkeys: could not write instance file " << path;
+    return;
+  }
+  LOG(INFO) << "sendkeys: registered instance " << path;
+}
+
+void SendKeysWatcher::RemoveInstanceFile() {
+  base::FilePath path = InstanceFilePathForThisProcess();
+  if (path.empty()) {
+    return;
+  }
+  base::DeleteFile(path);
+}
+
+// ---------------------------------------------------------------------------
+// Cookies (ADR 0011)
+// ---------------------------------------------------------------------------
+
+network::mojom::CookieManager* SendKeysWatcher::GetCookieManager(
+    content::BrowserContext* context) {
+  if (!context) {
+    return nullptr;
+  }
+  content::StoragePartition* partition = context->GetDefaultStoragePartition();
+  return partition ? partition->GetCookieManagerForBrowserProcess() : nullptr;
+}
+
+void SendKeysWatcher::InjectCookieExport(content::BrowserContext* context,
+                                         const std::string& spec) {
+  internal::ParsedIdArg req = internal::ParseCookieExport(spec);
+  if (req.id.empty()) {
+    LOG(WARNING) << "sendkeys: COOKIEEXPORT without a result id";
+    return;
+  }
+  if (!req.ok) {
+    base::DictValue err;
+    err.Set("ok", false);
+    err.Set("error", req.error);
+    WriteResultFile(req.id, std::move(err));
+    return;
+  }
+  network::mojom::CookieManager* manager = GetCookieManager(context);
+  if (!manager) {
+    base::DictValue err;
+    err.Set("ok", false);
+    err.Set("error", "no cookie manager for this profile");
+    WriteResultFile(req.id, std::move(err));
+    return;
+  }
+
+  // GetAllCookies, then filter in scope -- NOT GetCookieList(url). GetCookieList
+  // applies send-time rules (path, scheme, SameSite context), so it answers
+  // "what would this request carry", which is a SUBSET of "what does this
+  // profile hold for this site". An export built from the subset silently omits
+  // cookies the session needs later.
+  manager->GetAllCookies(base::BindOnce(
+      [](base::WeakPtr<SendKeysWatcher> self, std::string id,
+         std::string domain, const std::vector<net::CanonicalCookie>& all) {
+        if (!self) {
+          return;
+        }
+        base::ListValue cookies;
+        int http_only = 0;
+        for (const net::CanonicalCookie& c : all) {
+          if (!internal::CookieDomainInScope(c.Domain(), domain)) {
+            continue;
+          }
+          if (c.IsHttpOnly()) {
+            ++http_only;
+          }
+          cookies.Append(CookieToDict(c));
+        }
+        base::DictValue result;
+        const int count = static_cast<int>(cookies.size());
+        result.Set("ok", true);
+        result.Set("domain", domain);
+        result.Set("count", count);
+        result.Set("http_only_count", http_only);
+        result.Set("protocol", internal::kAgentProtocolVersion);
+        result.Set("cookies", std::move(cookies));
+        // Counts and a domain, never a name/value pair. The exported artifact
+        // IS the session; the log must not become a second copy of it.
+        LOG(INFO) << "[sendkeys] COOKIEEXPORT: " << count << " cookies ("
+                  << http_only << " HttpOnly) for " << domain;
+        self->WriteResultFile(id, std::move(result));
+      },
+      weak_factory_.GetWeakPtr(), req.id, req.arg));
+}
+
+void SendKeysWatcher::InjectCookieImport(content::BrowserContext* context,
+                                         const std::string& spec) {
+  internal::ParsedIdArg req = internal::ParseCookieImport(spec);
+  if (req.id.empty()) {
+    LOG(WARNING) << "sendkeys: COOKIEIMPORT without a result id";
+    return;
+  }
+  auto fail = [&](const std::string& message) {
+    base::DictValue err;
+    err.Set("ok", false);
+    err.Set("error", message);
+    WriteResultFile(req.id, std::move(err));
+  };
+  if (!req.ok) {
+    fail(req.error);
+    return;
+  }
+  network::mojom::CookieManager* manager = GetCookieManager(context);
+  if (!manager) {
+    fail("no cookie manager for this profile");
+    return;
+  }
+  std::optional<base::Value> parsed =
+      base::JSONReader::Read(req.arg, base::JSON_PARSE_RFC);
+  if (!parsed) {
+    fail("payload is not valid JSON");
+    return;
+  }
+  // Accept either the bare array or the whole COOKIEEXPORT ack, so a caller can
+  // pipe an export straight back in without reshaping it.
+  const base::ListValue* list = nullptr;
+  if (parsed->is_list()) {
+    list = &parsed->GetList();
+  } else if (parsed->is_dict()) {
+    list = parsed->GetDict().FindList("cookies");
+  }
+  if (!list) {
+    fail("payload has no cookie array (expected [...] or {\"cookies\":[...]})");
+    return;
+  }
+
+  auto state = base::MakeRefCounted<CookieImportState>(req.id);
+  net::CookieOptions options = net::CookieOptions::MakeAllInclusive();
+
+  for (const base::Value& entry : *list) {
+    const base::DictValue* c = entry.GetIfDict();
+    if (!c) {
+      state->AddRejected("", "", "entry is not a JSON object");
+      continue;
+    }
+    const std::string* name = c->FindString("name");
+    const std::string* value = c->FindString("value");
+    const std::string* domain = c->FindString("domain");
+    const std::string name_s = name ? *name : std::string();
+    const std::string domain_s = domain ? *domain : std::string();
+    if (!name || !value || !domain || domain->empty()) {
+      state->AddRejected(name_s, domain_s,
+                         "missing required field (name, value, domain)");
+      continue;
+    }
+    const std::string* path = c->FindString("path");
+    const std::string path_s = path && !path->empty() ? *path : "/";
+    const bool secure = c->FindBool("secure").value_or(false);
+    const bool http_only = c->FindBool("http_only").value_or(false);
+    const std::string* same_site_s = c->FindString("same_site");
+    net::CookieSameSite same_site =
+        same_site_s ? net::StringToCookieSameSite(*same_site_s).first
+                    : net::CookieSameSite::UNSPECIFIED;
+    const std::string* priority_s = c->FindString("priority");
+    net::CookiePriority priority =
+        priority_s ? net::StringToCookiePriority(*priority_s)
+                   : net::COOKIE_PRIORITY_DEFAULT;
+
+    base::Time expiry = MsStringToTime(c->FindString("expires_ms"));
+    if (expiry.is_null()) {
+      // Interop path: a jar written by some other tool spells expiry as seconds.
+      std::optional<double> secs = c->FindDouble("expires");
+      if (secs && *secs > 0) {
+        expiry = base::Time::FromSecondsSinceUnixEpoch(*secs);
+      }
+    }
+    base::Time creation = MsStringToTime(c->FindString("creation_ms"));
+    if (creation.is_null()) {
+      creation = base::Time::Now();
+    }
+    base::Time last_access = MsStringToTime(c->FindString("last_access_ms"));
+    if (last_access.is_null()) {
+      last_access = creation;
+    }
+
+    std::optional<net::CookiePartitionKey> partition_key;
+    if (const base::DictValue* pk = c->FindDict("partition_key")) {
+      const std::string* site = pk->FindString("top_level_site");
+      const bool cross_site =
+          pk->FindBool("has_cross_site_ancestor").value_or(true);
+      auto from_storage = net::CookiePartitionKey::FromStorage(
+          site ? *site : std::string(), cross_site);
+      if (!from_storage.has_value()) {
+        state->AddRejected(name_s, domain_s,
+                           "invalid partition key: " + from_storage.error());
+        continue;
+      }
+      partition_key = from_storage.value();
+    }
+
+    // The URL the cookie is treated as coming from. A Secure cookie set from an
+    // http:// source is refused by the store, so the scheme follows the
+    // attribute rather than defaulting -- otherwise every Secure cookie in a
+    // jar (i.e. every session cookie that matters) would land in `rejected`.
+    std::string host = domain_s;
+    while (!host.empty() && host.front() == '.') {
+      host = host.substr(1);
+    }
+    GURL source(std::string(secure ? "https://" : "http://") + host + path_s);
+    if (!source.is_valid()) {
+      state->AddRejected(name_s, domain_s, "domain/path do not form a URL");
+      continue;
+    }
+
+    net::CookieInclusionStatus status;
+    std::unique_ptr<net::CanonicalCookie> cookie =
+        net::CanonicalCookie::CreateSanitizedCookie(
+            source, *name, *value, domain_s, path_s, creation, expiry,
+            last_access, secure, http_only, same_site, priority, partition_key,
+            &status);
+    if (!cookie) {
+      // GetDebugString names the EXCLUSION REASONS, not the data.
+      state->AddRejected(name_s, domain_s,
+                         "not canonical: " + status.GetDebugString());
+      continue;
+    }
+
+    state->AddPending();
+    manager->SetCanonicalCookie(
+        *cookie, source, options,
+        base::BindOnce(
+            [](base::WeakPtr<SendKeysWatcher> self,
+               scoped_refptr<CookieImportState> st, std::string cookie_name,
+               std::string cookie_domain, net::CookieAccessResult access) {
+              if (access.status.IsInclude()) {
+                st->AddImported();
+              } else {
+                // THIS is the line ADR 0011 SS5 exists for. The store drops
+                // cookies it dislikes and returns normally; without this the
+                // ack would say "imported 47" over a jar that authenticates as
+                // nobody.
+                st->AddRejected(cookie_name, cookie_domain,
+                                "store refused: " + access.status.GetDebugString());
+              }
+              // Decrement FIRST, unconditionally: a callback that returns
+              // early on a dead watcher without releasing its slot would leave
+              // the counter above zero forever, and the ack would never be
+              // written even once the surviving callbacks landed.
+              std::optional<base::DictValue> done = st->ReleasePending();
+              if (self && done) {
+                self->WriteResultFile(st->id(), std::move(*done));
+              }
+            },
+            weak_factory_.GetWeakPtr(), state, name_s, domain_s));
+  }
+
+  // Release the guard. If every entry failed to parse this writes the ack now.
+  if (std::optional<base::DictValue> done = state->ReleasePending()) {
+    WriteResultFile(req.id, std::move(*done));
+  }
 }
 
 void SendKeysWatcher::InjectEval(content::RenderFrameHost* frame,
