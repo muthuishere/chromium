@@ -34,6 +34,9 @@ func (b *Browser) client() *spool.Client {
 	return c
 }
 
+// Spool returns an unpinned spool client, for browser-wide commands such as listing or closing tabs.
+func (b *Browser) SpoolClient() *spool.Client { return spool.New(b.Spool) }
+
 func (b *Browser) Alive() bool { return spool.New(b.Spool).Alive(8 * time.Second) }
 
 // AgentID keys this session's remembered tab. tmux session > env > "unowned".
@@ -70,6 +73,10 @@ func (b *Browser) EnsureTab() (string, error) {
 	if data, err := os.ReadFile(f); err == nil {
 		id := strings.TrimSpace(string(data))
 		if id != "" && b.tabExists(id) {
+			// Touch on reuse: the reaper reads this mtime as "last used". Without it, a long-lived
+			// lane looks idle from the moment its tab was created and gets reaped mid-work.
+			now := time.Now()
+			_ = os.Chtimes(f, now, now)
 			b.tabID = id
 			return id, nil
 		}

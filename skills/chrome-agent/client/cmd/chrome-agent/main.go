@@ -25,6 +25,7 @@ import (
 	"github.com/deemwarhq/chrome-agent/internal/recipes"
 	"github.com/deemwarhq/chrome-agent/internal/sites"
 	"github.com/deemwarhq/chrome-agent/internal/spool"
+	"github.com/deemwarhq/chrome-agent/internal/tabs"
 )
 
 // Protocol is what this client speaks. ADR 0009: a versioned handshake from the first public byte,
@@ -109,6 +110,8 @@ func main() {
 		evalCmd(rest, false)
 	case "evalcsp":
 		evalCmd(rest, true)
+	case "tabs":
+		tabsCmd(rest)
 	case "recipe":
 		recipeCmd(rest)
 	case "read":
@@ -597,6 +600,64 @@ func logQuietly(action, target string, result any) {
 	}
 }
 
+// tabsCmd lists and reaps per-session tabs. Reaping is STAGED like every other destructive verb
+// here: without --yes it only reports what it would close.
+func tabsCmd(args []string) {
+	b := liveBrowser()
+	res, err := b.SpoolClient().ListTabs(10 * time.Second)
+	if err != nil {
+		exit.Die(exit.Browser, "listtabs-failed", err.Error())
+	}
+	var live []tabs.Tab
+	if raw, ok := res["value"].([]any); ok {
+		for _, r := range raw {
+			if m, ok := r.(map[string]any); ok {
+				id, _ := m["tabId"].(string)
+				url, _ := m["url"].(string)
+				title, _ := m["title"].(string)
+				if id != "" {
+					live = append(live, tabs.Tab{TabID: id, URL: url, Title: title})
+				}
+			}
+		}
+	}
+	regs := tabs.Registrations(tabs.Dir(paths.ConfigDir()))
+	idle := 24 * time.Hour
+	for i, a := range args {
+		if a == "--idle" && i+1 < len(args) {
+			if d, err := time.ParseDuration(args[i+1]); err == nil {
+				idle = d
+			}
+		}
+	}
+	plan := tabs.Decide(live, regs, idle, time.Now(), map[string]bool{browser.AgentID(): true})
+
+	if len(args) == 0 || args[0] == "list" {
+		out(map[string]any{"live": len(live), "registered": len(regs), "plan": plan})
+		return
+	}
+	if args[0] != "reap" {
+		exit.Die(exit.Usage, "usage", "tabs list | tabs reap [--idle 24h] [--yes]")
+	}
+	if !contains(args, "--yes") {
+		out(map[string]any{"staged": true, "would_close": plan.Close, "would_forget": plan.Forget,
+			"unowned_left_alone": plan.Unowned, "note": "pass --yes to close them"})
+		return
+	}
+	closed := 0
+	for _, c := range plan.Close {
+		if err := b.SpoolClient().Send("CLOSETAB:" + c.TabID); err == nil {
+			_ = os.Remove(c.File)
+			closed++
+		}
+	}
+	for _, r := range plan.Forget {
+		_ = os.Remove(r.File)
+	}
+	logQuietly("tabs:reap", fmt.Sprintf("closed=%d forgot=%d", closed, len(plan.Forget)), plan)
+	out(map[string]any{"closed": closed, "forgot": len(plan.Forget), "unowned_left_alone": plan.Unowned})
+}
+
 func usage() {
 	fmt.Print(`chrome-agent — client for the undetectable chromium fork (Go; ADR 0010 slice 1)
 
@@ -619,6 +680,7 @@ func usage() {
   note <domain> "<learned>" | promote [<domain>] [--apply]
   ledger status|rotate       the audit trail and its rotation
   install [bindir]           assets + CLI onto PATH
+  tabs list | tabs reap [--idle 24h] [--yes]   close idle SESSION tabs; never a human's
   goto <url> [settle]        navigate THIS session's tab
   eval | evalcsp '<js>'      run JS in it (evalcsp survives strict script-src)
 

@@ -363,8 +363,11 @@ Linux is exactly what needs a Chromium build: the browser itself.
 - **facebook.com stays red**, honestly: the profile is signed out and `auth` agrees.
 - **Cron/launchd still unproven.**
 - **SCREENSHOT degrades under tab pressure** — it timed out at 38 tabs and recovered at 6. Not a
-  fork bug; a resource one. The real gap is that nothing reaps per-session tabs, so a busy day
-  leaks them until something starts timing out.
+  fork bug; a resource one. **Addressed in the Go client (2026-09-13):** `tabs reap` closes idle
+  SESSION tabs (staged until `--yes`), never a tab with no registration, and never the caller's
+  own; the tabid file is now touched on reuse so "idle" means unused, not merely old. The selection
+  rule is unit-tested; the close path (CLOSETAB by tabId) was proven by hand earlier, and a live run
+  of the Go verb is still owed.
 - **No protocol version.** `doctor`'s capability probe is the workaround; a real `VERSION` verb in
   the fork is the fix, and it is a fork change.
 
