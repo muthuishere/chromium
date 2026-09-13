@@ -38,7 +38,9 @@ def norm(t):
 def already_says(traps, text):
     want = norm(text)
     if not want:
-        return True
+        # An empty note is malformed, not "already covered". Swallowing it here meant a bad note
+        # never surfaced in any review.
+        return False
     have = " ".join(norm(traps))
     return " ".join(want[:12]) in have
 
@@ -134,12 +136,17 @@ def main():
     # A drift entry is a FAILURE REPORT, not yet a trap -- "post-url required" is a usage mistake,
     # not something the site lies about. --source lets a review promote the notes and leave the
     # drift log to be read by a human, which is the common case.
-    source = "all"
+    # Notes by default. A drift line is a FAILURE REPORT, not a trap: "post-url required" is a usage
+    # mistake, and promoting it writes noise into canon. The docstring always said so; the default
+    # said otherwise. --source=all restores the old behaviour explicitly.
+    source = "note"
     for a in argv:
         if a.startswith("--source="):
             source = a.split("=", 1)[1]
     if "--notes-only" in argv:
         source = "note"
+    if "--include-drift" in argv:
+        source = "all"
     domains = [args[0]] if args else sorted(
         d for d in os.listdir(PLAYBOOKS) if os.path.isdir(os.path.join(PLAYBOOKS, d)))
     report, total = {}, 0
