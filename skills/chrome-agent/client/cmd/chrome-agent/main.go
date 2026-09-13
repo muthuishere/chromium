@@ -9,12 +9,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/deemwarhq/chrome-agent/internal/browser"
 	"github.com/deemwarhq/chrome-agent/internal/doctor"
 	"github.com/deemwarhq/chrome-agent/internal/exit"
+	"github.com/deemwarhq/chrome-agent/internal/identity"
 	"github.com/deemwarhq/chrome-agent/internal/instance"
 	"github.com/deemwarhq/chrome-agent/internal/paths"
+	"github.com/deemwarhq/chrome-agent/internal/sites"
 	"github.com/deemwarhq/chrome-agent/internal/spool"
 )
 
@@ -47,6 +51,9 @@ func main() {
 	case "spool":
 		fmt.Println(paths.Spool())
 		return
+	case "sites":
+		sitesCmd(rest)
+		return
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -66,6 +73,12 @@ func main() {
 		instances(rest)
 	case "status":
 		status()
+	case "auth":
+		authCmd(rest)
+	case "login":
+		loginCmd(rest)
+	case "logout":
+		logoutCmd(rest)
 	default:
 		exit.Die(exit.Usage, "unknown-verb", fmt.Sprintf("unknown verb %q — run `chrome-agent help`", verb))
 	}
@@ -141,6 +154,184 @@ func status() {
 	out(res)
 }
 
+// --- slice 2: sites + identity ------------------------------------------------------------------
+
+func sitesCmd(args []string) {
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "list":
+		all := sites.All()
+		if contains(args, "--json") {
+			out(all)
+			return
+		}
+		for _, d := range all {
+			verb := d.Read.Verb
+			if verb == "" {
+				verb = "-"
+			}
+			fmt.Printf("  %-24s %-11s %-10s read=%-28s writes=%d\n", d.Domain, d.Status, d.From, verb, len(d.Write))
+		}
+	case "show", "resolve":
+		d := mustSite(args)
+		out(d)
+	case "path":
+		d := mustSite(args)
+		if d.Path == "" {
+			fmt.Println("(embedded in the binary)")
+			return
+		}
+		fmt.Println(d.Path)
+	case "validate":
+		// Default: the EFFECTIVE set — the definition that actually wins for each domain, which is
+		// what the browser will really use. `--all` additionally checks shadowed copies, which
+		// matters before a `sync --force` promotes one of them into service.
+		all := sites.All()
+		bad := 0
+		for _, d := range all {
+			errs := sites.Problems(d)
+			if len(errs) == 0 {
+				fmt.Printf("ok   %-28s %-11s %s\n", d.Domain, d.Status, d.From)
+				continue
+			}
+			bad++
+			fmt.Printf("FAIL %s (%s)\n", d.Domain, d.From)
+			for _, e := range errs {
+				fmt.Printf("     - %s\n", e)
+			}
+		}
+		shadowed := 0
+		if contains(args, "--all") {
+			shadowed, bad = validateShadowed(bad)
+		}
+		fmt.Printf("\n%d domain(s) checked", len(all))
+		if shadowed > 0 {
+			fmt.Printf(" + %d shadowed file(s)", shadowed)
+		}
+		fmt.Printf(", %d bad\n", bad)
+		if bad > 0 {
+			os.Exit(exit.Usage)
+		}
+	case "sync":
+		res, err := sites.Sync(contains(args, "--force"), contains(args, "--dry-run"))
+		if err != nil {
+			exit.Die(exit.Usage, "sync-failed", err.Error())
+		}
+		out(res)
+		if len(res.Kept) > 0 {
+			fmt.Fprintf(os.Stderr, "sites sync: %d locally-edited file(s) left alone — --force replaces them\n", len(res.Kept))
+		}
+	default:
+		exit.Die(exit.Usage, "usage", "sites list|show <domain>|path <domain>|validate|sync [--force]")
+	}
+}
+
+// validateShadowed checks the copies that are currently OUTRANKED. A broken shipped file is
+// invisible until someone runs `sync --force` and promotes it into service.
+func validateShadowed(bad int) (int, int) {
+	n := 0
+	for _, d := range sites.Shadowed() {
+		n++
+		errs := sites.Problems(d)
+		if len(errs) == 0 {
+			fmt.Printf("ok   %-28s %-11s %s (shadowed)\n", d.Domain, d.Status, d.From)
+			continue
+		}
+		bad++
+		fmt.Printf("FAIL %s (%s, shadowed)\n", d.Domain, d.From)
+		for _, e := range errs {
+			fmt.Printf("     - %s\n", e)
+		}
+	}
+	return n, bad
+}
+
+func contains(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func mustSite(args []string) *sites.Definition {
+	var name string
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "--") {
+			name = a
+			break
+		}
+	}
+	if name == "" {
+		exit.Die(exit.Usage, "usage", "needs a domain, e.g. chrome-agent sites show linkedin.com")
+	}
+	d, err := sites.Load(name)
+	if err != nil || d == nil {
+		exit.Die(exit.Usage, "no-definition", "no site definition for "+name)
+	}
+	return d
+}
+
+func domainArg(args []string, verb string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			return a
+		}
+	}
+	exit.Die(exit.Usage, "usage", verb+" <domain> — e.g. chrome-agent "+verb+" linkedin.com")
+	return ""
+}
+
+func liveBrowser() *browser.Browser {
+	b := browser.New()
+	if !b.Alive() {
+		exit.Die(exit.Browser, "browser-down", "no browser is servicing "+b.Spool+" — run: chrome-agent up")
+	}
+	return b
+}
+
+func authCmd(args []string) {
+	d := domainArg(args, "auth")
+	v, err := identity.Auth(liveBrowser(), d)
+	if err != nil {
+		exit.Die(exit.Usage, "no-probe", err.Error())
+	}
+	out(v)
+	if !v.SignedIn {
+		os.Exit(exit.Auth)
+	}
+}
+
+func loginCmd(args []string) {
+	d := domainArg(args, "login")
+	headless := os.Getenv("CHROMIUM_AGENT_HEADLESS") == "1" || os.Getenv("CHROME_AGENT_HEADLESS") == "1" || contains(args, "--headless")
+	if err := paths.RequireBinary(); err != nil {
+		exit.Die(exit.Browser, "fork-not-built", err.Error())
+	}
+	info, err := identity.Login(browser.New(), d, headless)
+	if err != nil {
+		exit.Die(exit.Browser, "login-failed", err.Error())
+	}
+	out(info)
+}
+
+func logoutCmd(args []string) {
+	d := domainArg(args, "logout")
+	res, err := identity.Logout(liveBrowser(), d)
+	if err != nil {
+		exit.Die(exit.Usage, "bad-definition", err.Error())
+	}
+	out(res)
+	// Idempotent by intent: "be signed out" is satisfied whether or not we had to do anything.
+	if !res.SignedOut {
+		os.Exit(exit.Site)
+	}
+}
+
 func usage() {
 	fmt.Print(`chrome-agent — client for the undetectable chromium fork (Go; ADR 0010 slice 1)
 
@@ -151,7 +342,12 @@ func usage() {
   exit-codes [--json]        0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused
   profile | spool            which profile/spool this invocation resolves to
 
+  auth <domain>              read-only {signed_in, as?} — exit 0 yes, 2 no
+  login <domain>             open the page for a HUMAN; types nothing, ever
+  logout <domain>            end THIS site's session; verifies with auth after
+  sites list|show|path|validate|sync [--force]
+
 Fork: $CHROME_AGENT_FORK (default ~/muthu/gitworkspace/chromium)
-Slice 1 of the Go port. auth/login/logout/read/sites still live in the bash CLI.
+Slices 1-2 of the Go port. read/verify/recipes still live in the bash CLI.
 `)
 }

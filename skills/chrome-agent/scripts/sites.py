@@ -24,7 +24,9 @@ import json, os, sys
 
 HOME = os.path.expanduser("~")
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHIPPED = os.path.join(SKILL, "sites")
+# The shipped copy lives inside the Go client module so `go:embed` can compile it into the binary
+# (ADR 0010). There is still exactly ONE shipped copy; both implementations read this path.
+SHIPPED = os.path.join(SKILL, "client", "assets", "sites")
 INSTALLED = os.path.join(HOME, ".config", "chrome-agent", "sites")
 OVERRIDE = os.environ.get("CHROME_AGENT_SITES") or ""
 

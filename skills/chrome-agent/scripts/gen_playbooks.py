@@ -63,7 +63,7 @@ SHARED_TRAP = ("**One shared browser, no mutex.** Two lanes attach to a nondeter
 def site_files():
     """domain -> the site definition (ADR 0004), for domains that have one."""
     out = {}
-    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sites")
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "client", "assets", "sites")
     for fn in sorted(os.listdir(d)):
         if not fn.endswith(".json"):
             continue

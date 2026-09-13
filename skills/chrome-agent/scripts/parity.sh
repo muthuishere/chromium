@@ -60,6 +60,35 @@ rc_same "unknown verb is a usage failure" definitelyNotAVerb
   if [ "$a" = "$b" ] && [ "$a" = 3 ]; then printf '  \033[32mPASS\033[0m missing fork exits 3 in both\n'
   else printf '  \033[31mFAIL\033[0m missing fork: bash %d, go %d\n' "$a" "$b"; fi )
 
+echo "-- slice 2: sites"
+same      "sites list"        sites list
+rc_same   "sites validate"    sites validate
+
+echo "-- slice 2: identity, against a SYNTHETIC site (never a real session)"
+S="$(mktemp -d)"
+cat > "$S/example.com.json" <<'JSON'
+{"domain":"example.com","home":"https://example.com/","aliases":[],
+ "login":{"url":"https://example.com/","note":"synthetic parity fixture","twofa":false},
+ "logout":{"method":"cookies","note":"synthetic"},
+ "auth":{"probe_js":"return {signed_in:false, why:'synthetic parity probe'};"},
+ "read":{"verb":"eval","fixture_url":"https://example.com/"},"write":[],
+ "traps":[],"status":"unverified","source":"hand","notes":"parity fixture"}
+JSON
+if "$BASH_CLI" status >/dev/null 2>&1; then
+  export CHROME_AGENT_SITES="$S" CHROME_AGENT_ID="parity-$$"
+  rc_same "auth on the fixture (signed out)" auth example.com
+  rc_same "logout on the fixture"            logout example.com
+  # A live, REAL session: both must name the same identity. Read-only.
+  a=$("$BASH_CLI" auth github.com 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("signed_in"),d.get("as"))' 2>/dev/null)
+  b=$("$GO_CLI"  auth github.com 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("signed_in"),d.get("as"))' 2>/dev/null)
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m auth github.com agrees (%s)\n' "$a"
+  else FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m auth github.com — bash %s, go %s\n' "$a" "$b"; fi
+  unset CHROME_AGENT_SITES CHROME_AGENT_ID
+else
+  printf '  \033[33mSKIP\033[0m identity checks — no browser is servicing the spool\n'
+fi
+rm -rf "$S"
+
 echo
 printf 'pass %d  fail %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
