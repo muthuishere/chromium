@@ -154,13 +154,13 @@ stage_linux(){
   else
     # en-US only. The full set is 123 MB of the 531 MB tree; nothing in the agent path reads them.
     for f in en-US.pak en.pak; do
-      [ -e "$b/locales/$f" ] && cp -p "$b/locales/$f" "$STAGE/locales/$f"
+      if [ -e "$b/locales/$f" ]; then cp -p "$b/locales/$f" "$STAGE/locales/$f"; fi
     done
   fi
 }
 
 trim_darwin_locales(){
-  [ "$ALL_LOCALES" = 1 ] && { note "keeping all locales (--all-locales)"; return 0; }
+  if [ "$ALL_LOCALES" = 1 ]; then note "keeping all locales (--all-locales)"; return 0; fi
   local res
   res="$(find "$STAGE/Chromium.app/Contents/Frameworks" -maxdepth 5 -type d -name Resources 2>/dev/null | head -1)"
   [ -n "$res" ] || { note "no framework Resources dir — no locales to trim"; return 0; }
@@ -191,7 +191,7 @@ esac
 # what ADR 0007's "doctor on a clean box, no repo present" asks for. The binaries stay at the
 # artifact root, so the CHROMIUM_SENDKEYS_OUT form documented in dist/README.md keeps working too.
 for f in chromesendkeys.cjs chromium-agent-launch.cjs; do
-  [ -f "$FORK/$f" ] && cp -p "$FORK/$f" "$STAGE/$f"
+  if [ -f "$FORK/$f" ]; then cp -p "$FORK/$f" "$STAGE/$f"; fi
 done
 mkdir -p "$STAGE/out"
 ( cd "$STAGE/out" && ln -sfn ../ Default )
@@ -308,11 +308,11 @@ fi
 echo
 say "done"
 note "stage   : $STAGE"
-[ -n "$TARBALL" ] && note "tarball : $TARBALL"
-[ -n "$ZIPFILE" ] && note "zip     : $ZIPFILE"
+if [ -n "$TARBALL" ]; then note "tarball : $TARBALL"; fi
+if [ -n "$ZIPFILE" ]; then note "zip     : $ZIPFILE"; fi
 note "manifest: $MAN"
 echo
 echo "Next — the artifact is NOT a release until the five gates pass on a machine that did not build it:"
 echo "  bash $SKILL/scripts/verify-release.sh ${TARBALL:-$STAGE}"
-[ "$OS" = darwin ] && echo "  and, before anyone downloads it: $SKILL/docs/release-macos.md (codesign + notarize)"
+if [ "$OS" = darwin ]; then echo "  and, before anyone downloads it: $SKILL/docs/release-macos.md (codesign + notarize)"; fi
 exit 0

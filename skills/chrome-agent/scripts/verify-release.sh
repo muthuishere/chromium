@@ -5,6 +5,8 @@
 #   bash scripts/verify-release.sh dist/chrome-agent-engine-…-linux-x64           # a staged dir
 #   bash scripts/verify-release.sh <artifact> --headful      # macOS headful instead of --headless=new
 #   bash scripts/verify-release.sh <artifact> --keep         # leave the scratch dir for inspection
+#   VERIFY_JSON=out.json bash scripts/verify-release.sh <artifact>   # write the gate report there,
+#                                                         # ready to paste into the manifest
 #
 # THE RULE THIS SCRIPT EXISTS TO ENFORCE: there is no SKIP. A gate is PASS or it is FAIL. A gate this
 # script cannot run — no client, no network, no binary, an unparseable answer — is a FAIL with a
@@ -85,7 +87,7 @@ fi
 say "gate 1/5 — relocation"
 UNPACK="$SCRATCH/unpacked"
 mkdir -p "$UNPACK"
-ROOT=""
+ROOT=""; REL_FAILED=0
 if [ -d "$ART" ]; then
   # A staged dir still has to be COPIED out of where it was staged; verifying it in place proves
   # nothing about an artifact someone unpacks in ~/Downloads.
@@ -96,11 +98,11 @@ elif [ -f "$ART" ]; then
   case "$ART" in
     *.tar.gz|*.tgz) tar xzf "$ART" -C "$UNPACK" ;;
     *.zip)          unzip -q "$ART" -d "$UNPACK" ;;
-    *)              gate_fail relocation "not an archive this script knows: $ART"; ROOT="" ;;
+    *)              gate_fail relocation "not an archive this script knows: $ART"; REL_FAILED=1 ;;
   esac
-  [ -z "${ROOT:-}" ] && ROOT="$(find "$UNPACK" -maxdepth 1 -mindepth 1 -type d | head -1)"
+  if [ "$REL_FAILED" = 0 ]; then ROOT="$(find "$UNPACK" -maxdepth 1 -mindepth 1 -type d | head -1)"; fi
 else
-  gate_fail relocation "no such artifact: $ART"
+  gate_fail relocation "no such artifact: $ART"; REL_FAILED=1
 fi
 
 BIN=""
@@ -116,7 +118,9 @@ if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
   fi
 fi
 
-if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+if [ "$REL_FAILED" = 1 ]; then
+  BIN=""
+elif [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
   gate_fail relocation "no launchable binary inside the unpacked artifact (looked for Chromium.app/Contents/MacOS/Chromium and ./chrome)"
 else
   # The cheapest guard against the single most likely mistake: shipping the wrong OS's binary.

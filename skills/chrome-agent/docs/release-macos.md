@@ -217,7 +217,7 @@ autoninja -C out/Release chrome chrome/installer/mac
 injects `com.apple.security.get-task-allow` and skips real signing checks — **never for a release**.)
 
 **UNVERIFIED — needs a real run.** `sign_chrome.py` has never been run against this fork. The fork
-patch touches 227 files (+18,538 / -257 as measured today, well past ADR 0007's "56 files / 298 KB"
+patch touches 261 files (+25,903 / -257 as measured today, well past ADR 0007's "56 files / 298 KB"
 figure) and adds new binaries under `media/` and `chrome/browser/`; if any of them land as separate
 nested Mach-O files rather than inside the framework, `parts.py`'s inventory needs an entry or the
 outer signature will not seal them. The first real run is what tells us.
@@ -284,6 +284,10 @@ false`, the spool protocol (eval / evalAsync / tabId registry / screenshot ack),
 **There is no SKIP.** A gate it cannot run is a FAIL with a named reason and a non-zero exit, because
 the failure this whole ADR is about is silent.
 
+`VERIFY_JSON=gates.json bash …/verify-release.sh <artifact>` writes the gate block in the manifest's
+shape, so the `UNVERIFIED` lines `package-release.sh` wrote get replaced by something a run actually
+produced — never by hand.
+
 What it does **not** cover, and what you must therefore check by hand from §4.5: signature, team id,
 hardened runtime, notarization ticket, and the download-and-launch test on a second Mac.
 
@@ -324,7 +328,7 @@ hardened runtime, notarization ticket, and the download-and-launch test on a sec
 
 | step | state |
 |---|---|
-| non-component `out/Release` build on darwin-arm64 | **started 2026-09-13** in a separate output dir at `nice 19 -j6`; `.app` size **unmeasured** until it lands |
+| non-component `out/Release` build on darwin-arm64 | **not finished.** Started 2026-09-13 at `nice 19 -j6`; starved by a load average of ~125 from unrelated work, then killed by a machine restart at ~3,900 of the tens of thousands of objects `chrome` needs. Restarted incrementally the same day. `.app` size **unmeasured**; relocation of a real non-component bundle **UNVERIFIED — needs a real run** |
 | `package-release.sh` / `verify-release.sh` | written, `bash -n` and shellcheck clean |
 | Developer ID Application certificate | **present** on this machine (`6PQ6534W2R`) |
 | `sign_chrome.py` against this fork | **UNVERIFIED — needs a real run** |

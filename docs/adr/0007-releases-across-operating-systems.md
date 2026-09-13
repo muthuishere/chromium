@@ -1,9 +1,13 @@
 # ADR 0007 — Releasing the fork across operating systems
 
-- **Status:** **PROPOSED, with the first artifact built and gated (2026-09-13).**
-  `chrome-agent-engine-152.0.7948.0+fork.1-linux-x64` exists, 185 MB, and passed all five gates.
-  Nothing is published and nothing is signed: macOS still needs a non-component build and
-  notarization, and no release has been cut.
+- **Status:** **PROPOSED, with tooling and the first artifact (2026-09-13).** The Linux artifact
+  (185 MB) passed all five gates. `scripts/package-release.sh` and `scripts/verify-release.sh` exist
+  and are checked: packaging refuses a component build, and verification only PASSes or FAILs, so a
+  gate it cannot run fails with a reason. No macOS artifact exists yet: the non-component build was
+  interrupted by a restart and resumed. Signing is mapped but not run. A Developer ID Application
+  identity is already in the keychain and `notarytool` is installed, but signing this fork with
+  `sign_chrome.py`, notarization, stapling and a second-Mac launch are all UNVERIFIED. Nothing is
+  published.
 - **Date:** 2026-09-13
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)
