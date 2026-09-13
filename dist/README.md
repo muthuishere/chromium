@@ -1,30 +1,35 @@
-# dist — built engine artifacts
+# chrome-agent engine — releases
 
-Naming and contents follow ADR 0007. Each artifact ships with `manifest.json` (upstream base, the
-patch that IS the fork, `args.gn`, measured sizes, and which gates passed) and `SHA256SUMS`.
+The undetectable Chromium fork the `chrome-agent` client drives. Verify the checksum before you
+run it — an unverified browser binary is not something to trust.
 
-**These are binaries, not source — they are NOT committed.** `.gitignore` excludes the tarballs;
-the manifest is committed because it is the recipe, and a build is reproducible from three fields:
-upstream revision + fork patch + args.
-
-## chrome-agent-engine-152.0.7948.0+fork.1-linux-x64
-
-| | |
-|---|---|
-| `chrome` binary | 486 MB (509,529,432 bytes), ELF x86-64, non-component |
-| staged tree | 531 MB (en-US only; all locales would add ~120 MB) |
-| tarball | 185 MB |
-
-Built on Ubuntu 24.04 from upstream `a9b5091aa0` plus the 298 KB fork patch. H.264/AAC enabled
-(`proprietary_codecs`) — note the patent-licensing obligation that attaches to *distributing*
-binaries with those decoders (ADR 0007).
-
-Unpack and point the client at it:
+## Quick install (Linux x86_64)
 
 ```sh
-tar xzf chrome-agent-engine-152.0.7948.0+fork.1-linux-x64.tar.gz
-export CHROMIUM_SENDKEYS_OUT=$PWD/chrome-agent-engine-152.0.7948.0+fork.1-linux-x64
-CHROMIUM_SENDKEYS_DIR=$(chrome-agent spool) "$CHROMIUM_SENDKEYS_OUT/chrome" \
-  --user-data-dir=~/chrome-agent-profile --headless=new --no-first-run --no-sandbox about:blank &
-chrome-agent status     # expect webdriver:false
+curl -fsSL https://hel1.your-objectstorage.com/publicassets/chrome-agent/install.sh | bash
+export CHROMIUM_SENDKEYS_OUT="$HOME/.local/share/chrome-agent/engine"
 ```
+
+The installer downloads the tarball, checks it against `SHA256SUMS`, refuses to unpack on a
+mismatch, and prints the env var to point the client at.
+
+## Files
+
+| file | what |
+|---|---|
+| `chrome-agent-engine-152.0.7948.0+fork.1-linux-x64.tar.gz` | the engine (486 MB unpacked, 185 MB gz) |
+| `SHA256SUMS` | checksums — the install refuses a mismatch |
+| `manifest.json` | the recipe: upstream base, fork patch, args.gn, gate results |
+| `install.sh` | download + verify + unpack |
+| `LICENSE` | Chromium's license (redistribution notice) |
+
+## Platforms
+
+- **linux-x64** — available, all five release gates passed (relocation, webdriver, spool protocol, doctor, a real read).
+- **darwin (macOS)** — not published yet; the build is in progress and will follow once it passes the same gates, signed and notarized so Gatekeeper does not quarantine it.
+
+## Provenance
+
+Chromium 152.0.7948.0 + a 298 KB agent patch over upstream `a9b5091aa0`. H.264/AAC are enabled.
+This build was verified on its build host; a second-machine check is still recommended before you
+depend on it. See `manifest.json` for the full recipe and gate results.
