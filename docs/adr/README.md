@@ -16,9 +16,9 @@ was intended — "PROPOSED" means no code, and a claim only becomes "PROVEN" whe
 | [0006](0006-chrome-agent-cli-separate-from-the-fork.md) | A distributable `chrome-agent` CLI, separate from the fork it drives | PARTLY BUILT — the discussion is still open. `doctor` exists and answers |
 | [0007](0007-releases-across-operating-systems.md) | Releasing the fork across operating systems | PROPOSED, with tooling and the first artifact (2026-09-13). The Linux ar |
 | [0008](0008-producing-the-linux-build.md) | Producing the Linux build of the fork | DONE, 2026-09-13. The first Linux build of this fork exists and passes e |
-| [0009](0009-the-public-agent-protocol.md) | The public agent protocol: instances, media, per-tab streams, and consent | PROPOSED. Nothing here is built. It supersedes the X/VNC half of ADR 000 |
-| [0010](0010-the-client-is-one-go-binary.md) | The client is one Go binary, and bash retires | SLICES 1-2 BUILT, 2026-09-13. One static binary, ~3.5 MB, cross-compiled |
-| [0011](0011-browser-state-export-and-import.md) | Exporting and importing browser state (cookies, storage) as an explicit credential | PROPOSED. Nothing is built. This is the highest-risk decision in the set |
+| [0009](0009-the-public-agent-protocol.md) | The public agent protocol: instances, media, per-tab streams, and consent | PARTLY BUILT, 2026-09-13. The VERSION handshake (§6) and the instance re |
+| [0010](0010-the-client-is-one-go-binary.md) | The client is one Go binary, and bash retires | SLICES 1-3 BUILT, 2026-09-13. One static binary, ~3.5 MB, five targets f |
+| [0011](0011-browser-state-export-and-import.md) | Exporting and importing browser state (cookies, storage) as an explicit credential | BUILT, NOT YET RUN, 2026-09-13. The engine has COOKIEEXPORT/COOKIEIMPORT |
 
 ## How they hang together
 

@@ -1,12 +1,14 @@
 # ADR 0010 — The client is one Go binary, and bash retires
 
-- **Status:** **SLICES 1-2 BUILT, 2026-09-13.** One static binary, ~3.5 MB, cross-compiled to five
-  targets from one laptop, and proven on a bare Ubuntu container with neither node nor python3
-  present. Implemented: the spool protocol, the instance registry, `doctor`, `status`, `hello`,
-  `goto`, `eval`/`evalcsp`, the exit-code contract, embedded site definitions, and
-  `auth`/`login`/`logout`/`sites`. Parity with bash is 14/14 and it drove every gate on the first
-  Linux engine artifact. Slice 3 (recipes, read, verify, profile/ledger/learned, grants, cookies)
-  is in progress; bash is frozen and retires at parity.
+- **Status:** **SLICES 1-3 BUILT, 2026-09-13.** One static binary, ~3.5 MB, five targets from one
+  laptop, proven on a bare Ubuntu container with no node and no python3. It now covers the whole
+  read/identity/operational surface — spool protocol, instances, `doctor` (with the VERSION
+  handshake), `status`, `hello`, `goto`, `eval`/`evalcsp`, `recipe`/`recipes`, `read`, `verify`,
+  `auth`/`login`/`logout`, `sites`, `profile`, `ledger`, `note`/`promote`, `install`, `tabs reap`,
+  and `cookies export`/`import` — with no node or python3 at runtime. Recipe execution is a
+  byte-identical Go re-extraction of the registry (48 verbs, matched against node). Parity with bash
+  is 14/14. Bash is frozen and retires once the engine and stream verbs have run against a live
+  VERSION-era build.
 - **Date:** 2026-09-13
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)

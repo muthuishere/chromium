@@ -1,7 +1,12 @@
 # ADR 0011 — Exporting and importing browser state (cookies, storage) as an explicit credential
 
-- **Status:** **PROPOSED.** Nothing is built. This is the highest-risk decision in the set: the
-  artifact it produces **is** the identity, in plaintext, in a file.
+- **Status:** **BUILT, NOT YET RUN, 2026-09-13.** The engine has COOKIEEXPORT/COOKIEIMPORT (full
+  cookie fidelity, domain-scoped, rejections reported, no value ever logged) and it compiles; the Go
+  client owns encryption at rest (scrypt→AES-256-GCM, unit-tested), the ledger, and a non-zero exit
+  on any rejected cookie. What is unproven is exactly what needs a running VERSION-era browser: a
+  real export on one machine and import on another, and the cross-OS transfer this ADR says lifts
+  0003 §4. Two ADR clauses were corrected by contact with the code — see §3 (encryption cannot live
+  in the engine) and §5 (partitioned/opaque keys, and deriving scheme from Secure).
 - **Date:** 2026-09-13
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)
@@ -112,6 +117,19 @@ the majority case and the model is simpler.
   only clears locally — explicitly is not.
 - Any agent that can run this can exfiltrate an identity. The scoping, the encryption and the
   local-only rule are what keep that from being one careless prompt away.
+
+## Corrected by contact with the code (2026-09-13)
+
+- **§3, encrypt at rest, moved to the client.** The engine has no key management and its only output
+  is the plaintext spool result file, so it cannot meaningfully encrypt. Encryption and the
+  `--i-know-this-is-a-credential` flag live in the Go client, which reads and should delete the
+  result promptly. (Done: scrypt→AES-256-GCM, `internal/cookies`.)
+- **§5, fidelity has two limits.** Partitioned cookies with opaque/nonced keys cannot be serialized —
+  the engine flags them `partition_key_unserializable` rather than dropping them silently. And import
+  must derive the source URL scheme from the `Secure` flag, or every Secure session cookie is refused.
+- **§4, "never through a grant" has no referent yet** — there is no WS plane to expose it on; the only
+  guard today is that the spool is local.
+- **§6, the ledger is the client's.** The engine logs only domain and counts.
 
 ## What would prove this
 

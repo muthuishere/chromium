@@ -1,7 +1,11 @@
 # ADR 0009 — The public agent protocol: instances, media, per-tab streams, and consent
 
-- **Status:** **PROPOSED.** Nothing here is built. It supersedes the X/VNC half of ADR 0003 and
-  settles the open half of ADR 0006.
+- **Status:** **PARTLY BUILT, 2026-09-13.** The VERSION handshake (§6) and the instance registry
+  (§2) are written in the engine and compile; the Go client sends VERSION in `doctor` and reads the
+  registry files. NEITHER has run in a browser — the VERSION-speaking `chrome` binary was never
+  built. The media source/sink model, the per-tab view/control grants, and the token-gated WS
+  control plane (§1, §3, §5) are NOT built; they remain the design of record and supersede ADR
+  0003's X/VNC login.
 - **Date:** 2026-09-13
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)
