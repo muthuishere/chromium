@@ -16,8 +16,13 @@ import (
 	"github.com/deemwarhq/chrome-agent/internal/doctor"
 	"github.com/deemwarhq/chrome-agent/internal/exit"
 	"github.com/deemwarhq/chrome-agent/internal/identity"
+	"github.com/deemwarhq/chrome-agent/internal/install"
 	"github.com/deemwarhq/chrome-agent/internal/instance"
+	"github.com/deemwarhq/chrome-agent/internal/learned"
+	"github.com/deemwarhq/chrome-agent/internal/ledger"
 	"github.com/deemwarhq/chrome-agent/internal/paths"
+	"github.com/deemwarhq/chrome-agent/internal/profile"
+	"github.com/deemwarhq/chrome-agent/internal/recipes"
 	"github.com/deemwarhq/chrome-agent/internal/sites"
 	"github.com/deemwarhq/chrome-agent/internal/spool"
 )
@@ -46,13 +51,32 @@ func main() {
 		hello()
 		return
 	case "profile":
-		fmt.Println(paths.Profile())
+		if len(rest) == 0 {
+			fmt.Println(paths.Profile())
+			return
+		}
+		profileCmd(rest)
 		return
 	case "spool":
 		fmt.Println(paths.Spool())
 		return
 	case "sites":
 		sitesCmd(rest)
+		return
+	case "recipes":
+		recipesCmd(rest)
+		return
+	case "ledger":
+		ledgerCmd(rest)
+		return
+	case "note":
+		noteCmd(rest)
+		return
+	case "promote":
+		promoteCmd(rest)
+		return
+	case "install":
+		installCmd(rest)
 		return
 	case "help", "-h", "--help":
 		usage()
@@ -85,6 +109,12 @@ func main() {
 		evalCmd(rest, false)
 	case "evalcsp":
 		evalCmd(rest, true)
+	case "recipe":
+		recipeCmd(rest)
+	case "read":
+		readCmd(rest)
+	case "verify":
+		verifyCmd(rest)
 	default:
 		exit.Die(exit.Usage, "unknown-verb", fmt.Sprintf("unknown verb %q — run `chrome-agent help`", verb))
 	}
@@ -382,6 +412,191 @@ func evalCmd(args []string, csp bool) {
 	out(v)
 }
 
+// --- slice 3: recipes, reads, and the operational verbs ------------------------------------------
+
+func recipesCmd(args []string) {
+	if len(args) > 0 && args[0] == "vendor" {
+		res, err := recipes.Sync(contains(args, "--force"), contains(args, "--dry-run"))
+		if err != nil {
+			exit.Die(exit.Usage, "vendor-failed", err.Error())
+		}
+		out(res)
+		return
+	}
+	list, err := recipes.List()
+	if err != nil {
+		exit.Die(exit.Usage, "no-registry", err.Error())
+	}
+	if contains(args, "--json") {
+		out(list)
+		return
+	}
+	for _, r := range list {
+		suffix := ""
+		if r.Source == "chrome-agent" {
+			suffix = "  [chrome-agent verb]"
+		}
+		fmt.Printf("  %s — %s%s\n", r.Key, r.Describe, suffix)
+	}
+}
+
+func recipeCmd(args []string) {
+	if len(args) == 0 {
+		exit.Die(exit.Usage, "usage", "recipe <site:name> [opts-json]")
+	}
+	optsJSON := ""
+	if len(args) > 1 {
+		optsJSON = args[1]
+	}
+	v, err := recipes.Run(liveBrowser(), args[0], optsJSON, recipes.Options{})
+	if err != nil {
+		exit.Die(exit.Site, "recipe-failed", err.Error())
+	}
+	logQuietly("recipe:"+args[0], args[0], v)
+	out(v)
+}
+
+func readCmd(args []string) {
+	if len(args) == 0 {
+		exit.Die(exit.Usage, "usage", "read <domain> [generic:recipe]")
+	}
+	generic := ""
+	if len(args) > 1 {
+		generic = args[1]
+	}
+	res, err := recipes.Read(liveBrowser(), args[0], generic)
+	if err != nil {
+		exit.Die(exit.Site, "read-failed", err.Error())
+	}
+	out(res)
+}
+
+// verifyCmd hands recipes.Verify an auth probe as its fallback: a site with no read recipe (HN had
+// none for months) is still verifiable by asking whether we are still someone there.
+func verifyCmd(args []string) {
+	if len(args) == 0 {
+		exit.Die(exit.Usage, "usage", "verify <domain>")
+	}
+	b := liveBrowser()
+	res, err := recipes.Verify(b, args[0], func(domain string) error {
+		v, err := identity.Auth(b, domain)
+		if err != nil {
+			return err
+		}
+		if !v.SignedIn {
+			return fmt.Errorf("not signed in: %s", v.Why)
+		}
+		return nil
+	})
+	if err != nil {
+		exit.Die(exit.Site, "verify-failed", err.Error())
+	}
+	out(res)
+	if !res.Verified {
+		os.Exit(exit.Site)
+	}
+}
+
+func profileCmd(args []string) {
+	switch args[0] {
+	case "create":
+		if len(args) < 2 {
+			exit.Die(exit.Usage, "usage", "profile create <dir>")
+		}
+		res, err := profile.Create(args[1])
+		if err != nil {
+			exit.Die(exit.Usage, "create-failed", err.Error())
+		}
+		out(res)
+	case "list":
+		out(profile.List())
+	case "delete", "rm":
+		if len(args) < 2 {
+			exit.Die(exit.Usage, "usage", "profile delete <dir> [--yes] [--force]")
+		}
+		res, err := profile.Delete(args[1], profile.DeleteOpts{
+			Yes:   contains(args, "--yes"),
+			Force: contains(args, "--force"),
+		})
+		if err != nil {
+			exit.Die(exit.Usage, "delete-refused", err.Error())
+		}
+		out(res)
+	case "show", "":
+		fmt.Println(paths.Profile())
+	default:
+		exit.Die(exit.Usage, "usage", "profile [create <dir> | list | delete <dir> [--yes]]")
+	}
+}
+
+func ledgerCmd(args []string) {
+	sub := "status"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "status":
+		out(ledger.StatusOf())
+	case "rotate":
+		if _, err := ledger.Rotate("manual"); err != nil {
+			exit.Die(exit.Usage, "rotate-failed", err.Error())
+		}
+		out(ledger.StatusOf())
+	default:
+		exit.Die(exit.Usage, "usage", "ledger status|rotate")
+	}
+}
+
+func noteCmd(args []string) {
+	if len(args) < 2 {
+		exit.Die(exit.Usage, "usage", `note <domain> "<what you learned>"`)
+	}
+	res, err := learned.Note(args[0], args[1])
+	if err != nil {
+		exit.Die(exit.Usage, "note-failed", err.Error())
+	}
+	out(res)
+}
+
+func promoteCmd(args []string) {
+	o := learned.Opts{Apply: contains(args, "--apply"), IncludeDrift: contains(args, "--include-drift")}
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			o.Domain = a
+			break
+		}
+	}
+	rep, err := learned.Promote(o)
+	if err != nil {
+		exit.Die(exit.Usage, "promote-failed", err.Error())
+	}
+	out(rep)
+}
+
+func installCmd(args []string) {
+	bin := install.DefaultBinDir()
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			bin = a
+			break
+		}
+	}
+	res, err := install.Install(bin)
+	if err != nil {
+		exit.Die(exit.Usage, "install-failed", err.Error())
+	}
+	out(res)
+}
+
+// logQuietly records an action in the audit trail. A failure to log must never fail the action —
+// but it must not be invisible either.
+func logQuietly(action, target string, result any) {
+	b, _ := json.Marshal(result)
+	if _, err := ledger.Append(browser.AgentID(), action, target, string(b)); err != nil {
+		fmt.Fprintf(os.Stderr, "ledger: %v\n", err)
+	}
+}
+
 func usage() {
 	fmt.Print(`chrome-agent — client for the undetectable chromium fork (Go; ADR 0010 slice 1)
 
@@ -396,10 +611,18 @@ func usage() {
   login <domain>             open the page for a HUMAN; types nothing, ever
   logout <domain>            end THIS site's session; verifies with auth after
   sites list|show|path|validate|sync [--force]
+  read <domain>              read any known site — its recipe, or the generic reader
+  verify <domain>            run the site's real read verb; prove the playbook is not fiction
+  recipe <key> [opts-json]   run any registry recipe through the fork
+  recipes [--json] | recipes vendor [--force]
+  profile [create <dir> | list | delete <dir> [--yes]]
+  note <domain> "<learned>" | promote [<domain>] [--apply]
+  ledger status|rotate       the audit trail and its rotation
+  install [bindir]           assets + CLI onto PATH
   goto <url> [settle]        navigate THIS session's tab
   eval | evalcsp '<js>'      run JS in it (evalcsp survives strict script-src)
 
 Fork: $CHROME_AGENT_FORK (default ~/muthu/gitworkspace/chromium)
-Slices 1-2 of the Go port. read/verify/recipes still live in the bash CLI.
+Slices 1-3 of the Go port: no node, no python3. Streams and cookies are next (ADR 0009/0011).
 `)
 }
