@@ -1419,5 +1419,10 @@ tid=sys.argv[1] if len(sys.argv)>1 else ""
 d=json.load(sys.stdin).get("value",[])
 t=next((x for x in d if x.get("tabId")==tid),None)
 print(json.dumps(t) if t else json.dumps({"error":"no tab with tabId "+tid}))' "${2:-}" ;;
-  *) usage;;
+  # NO ARGS -> usage, exit 0 (someone asking what this is).
+  # UNKNOWN VERB -> usage on stderr, exit 1. It used to exit 0, so a typo in a script reported
+  # success and the script carried on as if the command had run. Caught by bash-vs-Go parity,
+  # 2026-09-13; the Go client had it right.
+  '') usage;;
+  *) usage >&2; die "$EX_USAGE" "unknown-verb" "unknown verb '$1' — run: chrome-agent help";;
 esac

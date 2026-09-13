@@ -258,10 +258,12 @@ actually DO, each question under its own timeout: eval, evalasync, tabId-in-list
 ack. Fatal (evalasync, tabId) flips `ready` to false; degraded does not — calling a lost screenshot
 "not ready" would train an operator to ignore the word.
 
-**It found a live one on the first run: SCREENSHOT never acks on the running fork.** The verb is
-consumed and the result file never appears (`timed out waiting for result …`), so `shot` and `learn`
-cannot write a PNG right now. This is the 2026-07-21 failure again, and `shot()` already refuses to
-report a path it cannot see — which is why it was invisible until something asked.
+**It flagged SCREENSHOT on the first run — and that finding was TRANSIENT, not a break.** The
+verb timed out (`timed out waiting for result …`) while the browser was carrying 38 tabs, 32 of them
+leaked by this session's own tests. After those were closed it acks normally: both the bash and Go
+probes report `screenshot_ack: true`, and `chrome-agent shot` wrote a real 7,594-byte PNG
+(2026-09-13). So the correct statement is not "the fork is broken" but "SCREENSHOT degrades under
+tab pressure, and `doctor` sees it" — which is still worth knowing, and still worth a tab reaper.
 
 ### The ledger rotates
 
@@ -360,8 +362,9 @@ Linux is exactly what needs a Chromium build: the browser itself.
   ~300 characters of nothing. Each file's `notes` names the endpoint a real recipe should replay.
 - **facebook.com stays red**, honestly: the profile is signed out and `auth` agrees.
 - **Cron/launchd still unproven.**
-- **SCREENSHOT is broken on the live fork** (found by `doctor`, above). Nothing else depends on it,
-  but `learn`'s visual half is down until someone looks at the fork side.
+- **SCREENSHOT degrades under tab pressure** — it timed out at 38 tabs and recovered at 6. Not a
+  fork bug; a resource one. The real gap is that nothing reaps per-session tabs, so a busy day
+  leaks them until something starts timing out.
 - **No protocol version.** `doctor`'s capability probe is the workaround; a real `VERSION` verb in
   the fork is the fix, and it is a fork change.
 

@@ -355,3 +355,6 @@ third_party/rust/target/
 # chromium-agent fork: Taskfile staging + build log
 /dist/
 /build.log
+
+# built client binary (cross-compiled per target; never committed)
+skills/chrome-agent/client/chrome-agent
