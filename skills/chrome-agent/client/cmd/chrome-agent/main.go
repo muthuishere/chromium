@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/deemwarhq/chrome-agent/internal/browser"
+	"github.com/deemwarhq/chrome-agent/internal/cookies"
 	"github.com/deemwarhq/chrome-agent/internal/doctor"
 	"github.com/deemwarhq/chrome-agent/internal/exit"
 	"github.com/deemwarhq/chrome-agent/internal/identity"
@@ -110,6 +111,8 @@ func main() {
 		evalCmd(rest, false)
 	case "evalcsp":
 		evalCmd(rest, true)
+	case "cookies", "cookie":
+		cookiesCmd(rest)
 	case "tabs":
 		tabsCmd(rest)
 	case "recipe":
@@ -602,6 +605,58 @@ func logQuietly(action, target string, result any) {
 
 // tabsCmd lists and reaps per-session tabs. Reaping is STAGED like every other destructive verb
 // here: without --yes it only reports what it would close.
+// cookiesCmd is the client half of ADR 0011: the engine reads/writes the store (HttpOnly cookies
+// are invisible to a page), the client owns encryption, the ledger, and refusing to look like
+// success when cookies were rejected.
+func cookiesCmd(args []string) {
+	if len(args) == 0 {
+		exit.Die(exit.Usage, "usage", "cookies export <domain> --out FILE [--pass P | --i-know-this-is-a-credential] | cookies import --in FILE [--pass P]")
+	}
+	flag := func(name string) string {
+		for i, a := range args {
+			if a == name && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+	switch args[0] {
+	case "export":
+		var domain string
+		for _, a := range args[1:] {
+			if !strings.HasPrefix(a, "--") {
+				domain = a
+				break
+			}
+		}
+		outPath := flag("--out")
+		if domain == "" || outPath == "" {
+			exit.Die(exit.Usage, "usage", "cookies export <domain> --out FILE [--pass P | --i-know-this-is-a-credential]")
+		}
+		res, err := cookies.Export(liveBrowser(), domain, outPath, flag("--pass"), contains(args, "--i-know-this-is-a-credential"))
+		if err != nil {
+			exit.Die(exit.Usage, "export-failed", err.Error())
+		}
+		out(res)
+	case "import":
+		inPath := flag("--in")
+		if inPath == "" {
+			exit.Die(exit.Usage, "usage", "cookies import --in FILE [--pass P]")
+		}
+		res, err := cookies.Import(liveBrowser(), inPath, flag("--pass"))
+		if err != nil {
+			exit.Die(exit.Usage, "import-failed", err.Error())
+		}
+		out(res)
+		// A partial import is not a clean import. Exit non-zero so a script cannot treat it as one.
+		if res.RejectedCount > 0 {
+			os.Exit(exit.Site)
+		}
+	default:
+		exit.Die(exit.Usage, "usage", "cookies export ... | cookies import ...")
+	}
+}
+
 func tabsCmd(args []string) {
 	b := liveBrowser()
 	res, err := b.SpoolClient().ListTabs(10 * time.Second)
@@ -680,6 +735,7 @@ func usage() {
   note <domain> "<learned>" | promote [<domain>] [--apply]
   ledger status|rotate       the audit trail and its rotation
   install [bindir]           assets + CLI onto PATH
+  cookies export <domain> --out F [--pass P] | cookies import --in F [--pass P]
   tabs list | tabs reap [--idle 24h] [--yes]   close idle SESSION tabs; never a human's
   goto <url> [settle]        navigate THIS session's tab
   eval | evalcsp '<js>'      run JS in it (evalcsp survives strict script-src)

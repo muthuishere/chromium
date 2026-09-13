@@ -56,6 +56,8 @@ type SpoolInfo struct {
 
 type EngineInfo struct {
 	Running       bool     `json:"running"`
+	Protocol      int      `json:"protocol,omitempty"`
+	EngineVersion string   `json:"engine_version,omitempty"`
 	Eval          bool     `json:"eval"`
 	EvalAsync     bool     `json:"evalasync"`
 	TabID         bool     `json:"tabid"`
@@ -136,6 +138,20 @@ func probeEngine(dir string) EngineInfo {
 		return e
 	}
 	e.Running, e.Eval = true, true
+
+	// VERSION first. A live engine that does not ack it within a short window predates protocol 1
+	// (ADR 0009 §6) — which is worth SAYING, because every other capability probe below would then
+	// also be answering an engine that cannot speak the handshake.
+	if v, err := c.Version(6 * time.Second); err == nil {
+		if p, ok := v["protocol"].(float64); ok {
+			e.Protocol = int(p)
+		}
+		if ev, ok := v["engine_version"].(string); ok {
+			e.EngineVersion = ev
+		}
+	} else {
+		e.Note = "engine did not answer VERSION — it predates protocol 1; the capability probe below reflects an older engine"
+	}
 
 	if _, err := c.EvalAsync("return 1", 10*time.Second); err == nil {
 		e.EvalAsync = true

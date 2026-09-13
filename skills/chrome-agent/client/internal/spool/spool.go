@@ -160,6 +160,14 @@ func (c *Client) NewTab(url string, timeout time.Duration) (map[string]any, erro
 
 func (c *Client) Goto(url string) error { return c.Send("GOTO:" + url) }
 
+// Version asks the engine to identify itself (ADR 0009 §6). The rule that makes it useful: an
+// engine OLDER than this verb types the line into the page and never acks, so a timeout on a live
+// browser is not an error — it is "this engine predates protocol 1". The caller distinguishes the
+// two by (timeout AND browser alive) vs (timeout AND nothing there).
+func (c *Client) Version(timeout time.Duration) (map[string]any, error) {
+	return c.SendAndAwait(func(id string) string { return "VERSION:" + id }, timeout)
+}
+
 // Alive answers the only question every other verb depends on: is anything servicing this spool?
 func (c *Client) Alive(timeout time.Duration) bool {
 	_, err := c.Eval("1", timeout)
