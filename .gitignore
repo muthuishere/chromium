@@ -358,3 +358,7 @@ third_party/rust/target/
 
 # built client binary (cross-compiled per target; never committed)
 skills/chrome-agent/client/chrome-agent
+
+# built engine artifacts — the manifest is the recipe, the tarball is not source
+dist/*.tar.gz
+dist/*.zip

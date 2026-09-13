@@ -79,6 +79,12 @@ func main() {
 		loginCmd(rest)
 	case "logout":
 		logoutCmd(rest)
+	case "goto":
+		gotoCmd(rest)
+	case "eval":
+		evalCmd(rest, false)
+	case "evalcsp":
+		evalCmd(rest, true)
 	default:
 		exit.Die(exit.Usage, "unknown-verb", fmt.Sprintf("unknown verb %q — run `chrome-agent help`", verb))
 	}
@@ -332,6 +338,50 @@ func logoutCmd(args []string) {
 	}
 }
 
+func gotoCmd(args []string) {
+	if len(args) == 0 {
+		exit.Die(exit.Usage, "usage", "goto <url> [settle-seconds]")
+	}
+	settle := 4 * time.Second
+	if len(args) > 1 {
+		if n, err := time.ParseDuration(args[1] + "s"); err == nil {
+			settle = n
+		}
+	}
+	b := liveBrowser()
+	if err := b.Goto(args[0], settle); err != nil {
+		exit.Die(exit.Browser, "goto-failed", err.Error())
+	}
+	out(map[string]any{"ok": true, "url": args[0]})
+}
+
+// evalCmd runs JS in this session's tab. `evalcsp` is the CSP-safe path: on a page whose script-src
+// lacks 'unsafe-eval' (LinkedIn, X, most modern SPAs) a plain eval fails SILENTLY — no error, no
+// result — which is indistinguishable from a page that had nothing to say.
+func evalCmd(args []string, csp bool) {
+	if len(args) == 0 {
+		exit.Die(exit.Usage, "usage", "eval '<js that returns>' [timeout-seconds]")
+	}
+	timeout := 20 * time.Second
+	if len(args) > 1 {
+		if n, err := time.ParseDuration(args[1] + "s"); err == nil {
+			timeout = n
+		}
+	}
+	b := liveBrowser()
+	var v any
+	var err error
+	if csp {
+		v, err = b.EvalCSP(args[0], timeout)
+	} else {
+		v, err = b.EvalPlain(args[0], timeout)
+	}
+	if err != nil {
+		exit.Die(exit.Site, "eval-failed", err.Error())
+	}
+	out(v)
+}
+
 func usage() {
 	fmt.Print(`chrome-agent — client for the undetectable chromium fork (Go; ADR 0010 slice 1)
 
@@ -346,6 +396,8 @@ func usage() {
   login <domain>             open the page for a HUMAN; types nothing, ever
   logout <domain>            end THIS site's session; verifies with auth after
   sites list|show|path|validate|sync [--force]
+  goto <url> [settle]        navigate THIS session's tab
+  eval | evalcsp '<js>'      run JS in it (evalcsp survives strict script-src)
 
 Fork: $CHROME_AGENT_FORK (default ~/muthu/gitworkspace/chromium)
 Slices 1-2 of the Go port. read/verify/recipes still live in the bash CLI.

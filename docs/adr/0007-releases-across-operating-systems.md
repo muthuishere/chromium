@@ -1,8 +1,9 @@
 # ADR 0007 — Releasing the fork across operating systems
 
-- **Status:** **PROPOSED.** Nothing is released today. One load-bearing fact was **proven on
-  2026-09-13**: the current macOS build is not shippable at all (see Context). The first Linux
-  build is in progress under ADR 0008.
+- **Status:** **PROPOSED, with the first artifact built and gated (2026-09-13).**
+  `chrome-agent-engine-152.0.7948.0+fork.1-linux-x64` exists, 185 MB, and passed all five gates.
+  Nothing is published and nothing is signed: macOS still needs a non-component build and
+  notarization, and no release has been cut.
 - **Date:** 2026-09-13
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)

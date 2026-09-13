@@ -1,0 +1,30 @@
+{
+  "artifact": "chrome-agent-engine-152.0.7948.0+fork.1-linux-x64.tar.gz",
+  "chromium_version": "152.0.7948.0",
+  "upstream_base": "a9b5091aa0fa2f7aa769c1c6b2ceea8038e891dc",
+  "fork_patch_files": 56,
+  "fork_patch_lines": "+5833 / -257",
+  "args_gn": "is_debug=false is_component_build=false dcheck_always_on=false symbol_level=0 blink_symbol_level=0 is_official_build=false enable_nacl=false target_cpu=\"x64\" proprietary_codecs=true ffmpeg_branding=\"Chrome\"",
+  "built_on": "Ubuntu 24.04.4 LTS / x86_64 / 12 cores (nice 19, 8 jobs)",
+  "built_at": "2026-09-13T07:30:00Z",
+  "sizes": {
+    "chrome_binary_bytes": 509529432,
+    "chrome_binary_human": "486M",
+    "staged_tree": "531M (en-US locale only; the full locales dir is 123M)",
+    "tarball_bytes": 193363032,
+    "tarball_human": "185M"
+  },
+  "sha256": "4fc3c47534cc525a05fbe1fda38c1d4bddcd176b1f430b4187c248e3c9aafa43",
+  "gates": {
+    "relocation": "pass — unpacked in /opt on the build host, runs there, ldd reports 0 missing libs",
+    "webdriver": "pass — navigator.webdriver === false through the spool, headless",
+    "spool_protocol": "pass — doctor probe: eval, evalasync, tabId, screenshot ack all green",
+    "doctor": "pass — ready: true against the unpacked artifact",
+    "read": "pass — 30 Hacker News items with titles, end to end via the Go client"
+  },
+  "notes": [
+    "First Linux build of this fork. ADR 0008's blocking item is closed.",
+    "Verified with the GO client only — no node, no python3 involved in the gates.",
+    "Gates ran on the build host in a different directory; a second Linux machine is still the stronger test (ADR 0007)."
+  ]
+}
