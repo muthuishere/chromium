@@ -1,7 +1,12 @@
 # ADR 0010 — The client is one Go binary, and bash retires
 
-- **Status:** **ACCEPTED, not started.** The owner's call, 2026-09-13: "we don't need bash CLI, let
-  all go to golang."
+- **Status:** **SLICES 1-2 BUILT, 2026-09-13.** One static binary, ~3.5 MB, cross-compiled to five
+  targets from one laptop, and proven on a bare Ubuntu container with neither node nor python3
+  present. Implemented: the spool protocol, the instance registry, `doctor`, `status`, `hello`,
+  `goto`, `eval`/`evalcsp`, the exit-code contract, embedded site definitions, and
+  `auth`/`login`/`logout`/`sites`. Parity with bash is 14/14 and it drove every gate on the first
+  Linux engine artifact. Slice 3 (recipes, read, verify, profile/ledger/learned, grants, cookies)
+  is in progress; bash is frozen and retires at parity.
 - **Date:** 2026-09-13
 - **Owner:** Muthu (fork maintainer)
 - **Author:** Claude Code (chrome-agent session)
