@@ -126,3 +126,7 @@ cat <<DONE
   next:   task build            # (Taskfile.yml) rebuild the agent browser
   undo:   git reset --hard $ROLLBACK
 DONE
+
+# After a successful sync, rebuild the engine with the CANONICAL args (codecs on, non-component):
+#   scripts/build-release.sh out/Release
+# The build config lives in build-config/agent-release.gn and travels with this fork across syncs.

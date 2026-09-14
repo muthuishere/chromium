@@ -1,0 +1,28 @@
+# agent-release.gn — the CANONICAL release build args for the chrome-agent fork.
+#
+# This file is committed to the fork, so it travels with every upstream sync (sync-upstream.sh
+# replays our stack onto the new base and this comes with it). That is the whole point: the codec
+# setting, and the rest of the release configuration, must NOT live in a throwaway build command
+# again. On 2026-09-13 the codec flag lived only in an ad-hoc script in /tmp, a wrapper re-ran
+# `gn gen` without it, and fork.1 shipped with proprietary codecs OFF while its metadata claimed
+# ON. A committed args file cannot be silently dropped by a resume.
+#
+# Build with:  scripts/build-release.sh   (which feeds this file to `gn gen out/Release`)
+
+is_debug = false
+is_component_build = false      # ONE relocatable binary, not ~500 loose dylibs (ADR 0007)
+dcheck_always_on = false
+symbol_level = 0
+blink_symbol_level = 0
+is_official_build = false
+enable_nacl = false
+target_cpu = "x64"
+
+# PLAY EVERYTHING. proprietary_codecs + the Chrome ffmpeg branding add H.264/AVC, AAC and MP3 on top
+# of Chromium's always-on open codecs (VP8/VP9/AV1/Opus/Vorbis/FLAC). Without these, most MP4 files
+# and H.264 WebRTC do not play — which guts the per-tab media features this browser exists for.
+# NOTE for whoever distributes the binary: shipping decoders for these formats carries patent-
+# licensing obligations, which is why upstream ships them off by default. That is a distribution
+# decision, recorded and owner-approved; it is not a reason to drop the flag from a build.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
