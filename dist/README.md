@@ -17,7 +17,7 @@ mismatch, and prints the env var to point the client at.
 
 | file | what |
 |---|---|
-| `chrome-agent-engine-152.0.7948.0+fork.1-linux-x64.tar.gz` | the engine (486 MB unpacked, 185 MB gz) |
+| `chrome-agent-engine-152.0.7948.0+fork.2-linux-x64.tar.gz` | the engine (489 MB unpacked, 186 MB gz) |
 | `SHA256SUMS` | checksums — the install refuses a mismatch |
 | `manifest.json` | the recipe: upstream base, fork patch, args.gn, gate results |
 | `install.sh` | download + verify + unpack |
@@ -32,6 +32,6 @@ mismatch, and prints the env var to point the client at.
 
 ## Provenance
 
-Chromium 152.0.7948.0 + a 298 KB agent patch over upstream `a9b5091aa0`. H.264/AAC are NOT enabled in this build (open codecs only — see BUILD.md; a codec-enabled fork.2 is being produced).
+Chromium 152.0.7948.0 + a 298 KB agent patch over upstream `a9b5091aa0`. H.264/AAC/MP3 ARE enabled and runtime-verified (canPlayType 'probably') — this build plays everything. See BUILD.md.
 This build was verified on its build host; a second-machine check is still recommended before you
 depend on it. See `manifest.json` for the full recipe and gate results.

@@ -11,7 +11,7 @@ BASE_URL="${BASE_URL:-https://hel1.your-objectstorage.com/publicassets/chrome-ag
 DEST="${CHROME_AGENT_ENGINE_DIR:-$HOME/.local/share/chrome-agent/engine}"
 
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)  ART="chrome-agent-engine-152.0.7948.0+fork.1-linux-x64.tar.gz" ;;
+  Linux-x86_64)  ART="chrome-agent-engine-152.0.7948.0+fork.2-linux-x64.tar.gz" ;;
   Darwin-arm64|Darwin-x86_64)
     echo "macOS build is not published yet — see the release notes." >&2; exit 1 ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
