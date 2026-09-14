@@ -22,6 +22,8 @@ mismatch, and prints the env var to point the client at.
 | `manifest.json` | the recipe: upstream base, fork patch, args.gn, gate results |
 | `install.sh` | download + verify + unpack |
 | `LICENSE` | Chromium's license (redistribution notice) |
+| `BUILD.md` | full provenance: flags, codecs, capabilities |
+| `agent-fork.patch` | the entire fork as one patch over upstream — read exactly what changed |
 
 ## Platforms
 
@@ -30,6 +32,6 @@ mismatch, and prints the env var to point the client at.
 
 ## Provenance
 
-Chromium 152.0.7948.0 + a 298 KB agent patch over upstream `a9b5091aa0`. H.264/AAC are enabled.
+Chromium 152.0.7948.0 + a 298 KB agent patch over upstream `a9b5091aa0`. H.264/AAC are NOT enabled in this build (open codecs only — see BUILD.md; a codec-enabled fork.2 is being produced).
 This build was verified on its build host; a second-machine check is still recommended before you
 depend on it. See `manifest.json` for the full recipe and gate results.
