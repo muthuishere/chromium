@@ -85,7 +85,7 @@ VP9 / H.264 stream: ~3 Mbps → 0.4% of that
 ```
 
 Raw frames over a socket are impossible over a tunnel and wasteful over loopback. The engine
-already owns encoders (VP8/VP9, and H.264 since `proprietary_codecs` was enabled 2026-09-13), often
+already owns encoders (VP8/VP9 always; H.264 once `proprietary_codecs` is enabled — the codec-enabled fork.2, not fork.1), often
 hardware-backed. **A sink emits an encoded stream; no client ever handles raw frames.** This is also
 what makes the client's language a developer-experience decision rather than a performance one
 (ADR 0010).
