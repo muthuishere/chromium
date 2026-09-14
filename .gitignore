@@ -362,3 +362,7 @@ skills/chrome-agent/client/chrome-agent
 # built engine artifacts — the manifest is the recipe, the tarball is not source
 dist/*.tar.gz
 dist/*.zip
+
+# mac release staging: signed .app + notary zip are build output; sign.sh + entitlements are tracked
+/dist-mac/Chromium.app/
+/dist-mac/*.zip

@@ -11,12 +11,44 @@
     "proprietary_codecs": true,
     "runtime_verified": true,
     "note": "USE_PROPRIETARY_CODECS=1 (media_buildflags.h) AND proven at runtime: canPlayType returns 'probably' for H.264, AAC, MP3 on the shipped binary.",
-    "plays": ["H.264/AVC", "AAC", "MP3", "VP8", "VP9", "AV1", "Opus", "Vorbis", "FLAC", "WAV", "HEVC(platform)"]
+    "plays": [
+      "H.264/AVC",
+      "AAC",
+      "MP3",
+      "VP8",
+      "VP9",
+      "AV1",
+      "Opus",
+      "Vorbis",
+      "FLAC",
+      "WAV",
+      "HEVC(platform)"
+    ]
   },
-  "capabilities": ["spool-control", "tabs", "tabid", "goto", "eval", "evalasync", "evalasync-b64-csp", "screenshot", "waitfor", "netlog", "audio-in", "audio-out-tap", "video-in", "undetectable(navigator.webdriver=false)"],
+  "capabilities": [
+    "spool-control",
+    "tabs",
+    "tabid",
+    "goto",
+    "eval",
+    "evalasync",
+    "evalasync-b64-csp",
+    "screenshot",
+    "waitfor",
+    "netlog",
+    "audio-in",
+    "audio-out-tap",
+    "video-in",
+    "undetectable(navigator.webdriver=false)"
+  ],
   "capabilities_note": "fork.2 agent layer. The VERSION handshake and cookie export/import are newer engine work not in this binary; they ship in a later release.",
   "sha256": "fbf8ef7d54a1864af5a04611ffd9e767e3f53186f25c6f9f9bb959cd53440eaa",
-  "sizes": {"chrome_binary_bytes": 512870600, "chrome_binary_human": "489M", "staged_tree": "534M", "tarball_human": "186M"},
+  "sizes": {
+    "chrome_binary_bytes": 512870600,
+    "chrome_binary_human": "489M",
+    "staged_tree": "534M",
+    "tarball_human": "186M"
+  },
   "gates": {
     "relocation": "pass — unpacked in /opt, ldd 0 missing",
     "webdriver": "pass — navigator.webdriver === false, headless",
@@ -24,5 +56,33 @@
     "spool_protocol": "pass",
     "read": "pass (fork.1; same agent layer)"
   },
-  "verified_on_second_machine": false
+  "verified_on_second_machine": false,
+  "macos": {
+    "artifact": "chrome-agent-engine-152.0.7948.0+fork.2-mac-arm64.tar.gz",
+    "sha256": "a6263fbbdb2cd7faea50752b713493ecbbe96ca4255e720e04e01c424a898996",
+    "target": "darwin-arm64 (Apple Silicon)",
+    "args_gn": "is_debug=false is_component_build=false dcheck_always_on=false symbol_level=0 blink_symbol_level=0 is_official_build=false proprietary_codecs=true ffmpeg_branding=\"Chrome\"",
+    "built_on": "macOS 26.4 / arm64",
+    "signing": {
+      "identity": "Developer ID Application: Suguna Paulraj (6PQ6534W2R)",
+      "hardened_runtime": true,
+      "notarized": true,
+      "notary_submission": "66d7e061-1fe9-4ba6-956a-b1d30162cc67",
+      "stapled": true
+    },
+    "sizes": {
+      "app_human": "526M",
+      "tarball_human": "180M"
+    },
+    "gates": {
+      "codesign": "pass — codesign --verify --deep --strict on the unpacked tarball",
+      "gatekeeper": "pass — spctl: accepted, source=Notarized Developer ID",
+      "relocation": "pass — launcher links @executable_path/../Frameworks, runs from an unpacked copy",
+      "spool_protocol": "pass — launched via chromium-agent-launch.cjs from the unpacked tarball, eval over the spool",
+      "webdriver": "pass — navigator.webdriver === false",
+      "codecs_runtime": "pass — canPlayType 'probably' for H.264/AAC/MP3/VP9 on the shipped app"
+    },
+    "install": "unpacks to $CHROME_AGENT_ENGINE_DIR/Chromium.app; the launcher finds it via CHROMIUM_SENDKEYS_OUT",
+    "verified_on_second_machine": false
+  }
 }

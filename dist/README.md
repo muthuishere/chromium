@@ -17,7 +17,8 @@ mismatch, and prints the env var to point the client at.
 
 | file | what |
 |---|---|
-| `chrome-agent-engine-152.0.7948.0+fork.2-linux-x64.tar.gz` | the engine (489 MB unpacked, 186 MB gz) |
+| `chrome-agent-engine-152.0.7948.0+fork.2-linux-x64.tar.gz` | the engine, Linux (489 MB unpacked, 186 MB gz) |
+| `chrome-agent-engine-152.0.7948.0+fork.2-mac-arm64.tar.gz` | the engine, macOS Apple Silicon — signed + notarized `Chromium.app` (526 MB unpacked, 180 MB gz) |
 | `SHA256SUMS` | checksums — the install refuses a mismatch |
 | `manifest.json` | the recipe: upstream base, fork patch, args.gn, gate results |
 | `install.sh` | download + verify + unpack |
@@ -28,7 +29,7 @@ mismatch, and prints the env var to point the client at.
 ## Platforms
 
 - **linux-x64** — available, all five release gates passed (relocation, webdriver, spool protocol, doctor, a real read).
-- **darwin (macOS)** — not published yet; the build is in progress and will follow once it passes the same gates, signed and notarized so Gatekeeper does not quarantine it.
+- **darwin-arm64 (macOS, Apple Silicon)** — available. Developer ID signed, notarized and stapled (Gatekeeper-clean); gates passed: codesign, Gatekeeper, relocation, spool protocol, webdriver, runtime codecs. Intel Macs are not built.
 
 ## Provenance
 
