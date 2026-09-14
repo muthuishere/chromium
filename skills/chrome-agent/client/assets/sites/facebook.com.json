@@ -33,5 +33,6 @@
   ],
   "status": "unverified",
   "source": "hand",
-  "notes": "HYPOTHESIS. Converted from the CLI's `_auth_probe_js` case branch and playbooks/facebook.com/ (meta.md says last_verified: never). As of 2026-09-12 the auth probe reports signed OUT in this profile and facebook:feed returns 0 items, so nothing here has been driven green. `chrome-agent verify facebook.com` plus a live `auth` are what promote this to verified."
+  "notes": "HYPOTHESIS. Converted from the CLI's `_auth_probe_js` case branch and playbooks/facebook.com/ (meta.md says last_verified: never). As of 2026-09-12 the auth probe reports signed OUT in this profile and facebook:feed returns 0 items, so nothing here has been driven green. `chrome-agent verify facebook.com` plus a live `auth` are what promote this to verified.",
+  "probe_checked": "2026-09-14: Go client `auth` ran live against the owner profile and returned a clean signed_out verdict (no c_user cookie). Signed-OUT path proven again; signed-IN path still a hypothesis (profile is not signed in here)."
 }

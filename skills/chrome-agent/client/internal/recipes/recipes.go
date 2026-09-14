@@ -74,9 +74,13 @@ type Recipe struct {
 	Verb     string `json:"verb"`
 	Describe string `json:"describe"`
 	Write    bool   `json:"write"`
-	World    string `json:"world"`
-	Source   string `json:"source"` // registry | chrome-agent | user
-	CLI      string `json:"cli"`
+	// Class is the pacing/confirmation class: "read" | "react" | "mutate". A react (like, repost,
+	// upvote) is a reversible toggle on someone else's content; a mutate creates or deletes content.
+	// Write stays for the consumers that already match on it; Class is what a pacer keys on.
+	Class  string `json:"class"`
+	World  string `json:"world"`
+	Source string `json:"source"` // registry | chrome-agent | user
+	CLI    string `json:"cli"`
 
 	Match string `json:"-"`
 	Fn    string `json:"-"` // the recipe function's source; empty for a chrome-agent builtin
@@ -90,26 +94,43 @@ type Recipe struct {
 type builtin struct {
 	key, describe, cli string
 	write              bool
-	js                 string // empty = no Go implementation yet (the bash DOM actions)
+	class              string // "read" | "react" — a react builtin runs through React(), not Run()
+	js                 string // page body for a read builtin; empty for a react (orchestrated in Go)
+}
+
+// Recipe classes.
+const (
+	ClassRead   = "read"
+	ClassReact  = "react"
+	ClassMutate = "mutate"
+)
+
+// classFor is the class of a registry or user recipe: they cannot express "react", so a write is a
+// mutate and everything else is a read.
+func classFor(write bool) string {
+	if write {
+		return ClassMutate
+	}
+	return ClassRead
 }
 
 var builtins = []builtin{
-	{key: "linkedin:like", write: true,
+	{key: "linkedin:like", write: true, class: ClassReact,
 		describe: "like the post at <url> (or the first feed post) — verified by the reaction button flipping state",
 		cli:      "chrome-agent linkedin like <url> --confirm"},
-	{key: "x:like", write: true,
+	{key: "x:like", write: true, class: ClassReact,
 		describe: "like the tweet at <url> — verified by data-testid flipping like -> unlike",
 		cli:      "chrome-agent x like <url> --confirm"},
-	{key: "x:repost", write: true,
+	{key: "x:repost", write: true, class: ClassReact,
 		describe: "repost the tweet at <url> — verified by data-testid flipping retweet -> unretweet",
 		cli:      "chrome-agent x repost <url> --confirm"},
-	{key: "reddit:upvote", write: true,
+	{key: "reddit:upvote", write: true, class: ClassReact,
 		describe: "upvote the post at <url> — verified by aria-pressed becoming true",
 		cli:      "chrome-agent reddit upvote <url> --confirm"},
-	{key: "hackernews:top", write: false,
+	{key: "hackernews:top", write: false, class: ClassRead,
 		describe: "read the HN front page: title, points, comments, item link",
 		cli:      "chrome-agent hackernews top [n]", js: hnTopJS},
-	{key: "hackernews:item", write: false,
+	{key: "hackernews:item", write: false, class: ClassRead,
 		describe: "read a thread back by url or id — comments with depth, and the [flagged]/[dead] a 200 hides",
 		cli:      "chrome-agent hackernews item <url-or-id>", js: hnItemJS},
 }
@@ -287,6 +308,7 @@ func parseRecipeFile(s, file, label string, out map[string]*Recipe) error {
 				}
 			}
 			r.Site, r.Verb = splitKey(r.Key)
+			r.Class = classFor(r.Write)
 			out[r.Key] = r
 		}
 	}
@@ -361,6 +383,7 @@ func userRecipes(t tree) map[string]*Recipe {
 				continue
 			}
 			r.Site, r.Verb = splitKey(r.Key)
+			r.Class = classFor(r.Write)
 			out[r.Key] = r
 		}
 	}
@@ -398,7 +421,7 @@ func List() ([]Recipe, error) {
 		// world "main" in lower case, because that is what this list has always said for a
 		// chrome-agent DOM verb and a consumer may be matching on the string.
 		out = append(out, Recipe{Key: b.key, Site: site, Verb: verb, Describe: b.describe,
-			Write: b.write, World: "main", Source: "chrome-agent", CLI: b.cli, From: "builtin"})
+			Write: b.write, Class: b.class, World: "main", Source: "chrome-agent", CLI: b.cli, From: "builtin"})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
@@ -421,7 +444,7 @@ func Resolve(key string) (*Recipe, error) {
 		if b.key == key {
 			site, verb := splitKey(key)
 			return &Recipe{Key: key, Site: site, Verb: verb, Describe: b.describe, Write: b.write,
-				World: "main", Source: "chrome-agent", CLI: b.cli, From: "builtin", Fn: b.js}, nil
+				Class: b.class, World: "main", Source: "chrome-agent", CLI: b.cli, From: "builtin", Fn: b.js}, nil
 		}
 	}
 	known := []string{}
@@ -479,8 +502,13 @@ func Run(b *browser.Browser, key, optsJSON string, opt Options) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if r.Class == ClassReact {
+		// A react is not one page body: it navigates, reads state, clicks, and re-reads (React()).
+		// Running it through `recipe` would also skip the site verb's pacing and confirm gate.
+		return nil, fmt.Errorf("%s is a react verb — it does not run through `recipe`; use: %s", key, r.CLI)
+	}
 	if r.Source == "chrome-agent" && r.Fn == "" {
-		return nil, fmt.Errorf("%s is a chrome-agent DOM verb with no Go implementation yet — it is listed, not runnable here; run the bash verb: %s", key, r.CLI)
+		return nil, fmt.Errorf("%s is a chrome-agent verb with no page body — it is listed, not runnable here: %s", key, r.CLI)
 	}
 	if !opt.NoOrigin {
 		if err := EnsureOrigin(b, key); err != nil {

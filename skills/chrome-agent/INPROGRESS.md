@@ -341,13 +341,52 @@ Linux is exactly what needs a Chromium build: the browser itself.
 
 ---
 
+## Fourth pass 2026-09-14 — the client installs its own browser, and every action is paced
+
+### The engine ships, and the client no longer needs the fork
+Releases are public for **linux-x64** and **macOS arm64** (signed + notarized; Intel macs will not be
+built). `chrome-agent engine install` fetches `manifest.json` + `SHA256SUMS`, refuses any mismatch,
+unpacks with symlinks intact (the macOS framework fails its code signature without them) and swaps
+the tree into `~/.local/share/chrome-agent/engine` atomically. Browser resolution is now
+`$CHROMIUM_SENDKEYS_OUT` > installed engine > `$CHROME_AGENT_FORK/out/Default`; `RequireFork` is gone,
+and a missing browser names `engine install` as the fix. Proven on this Mac: install into a throwaway
+dir → codesign strict passes on the Go-extracted .app → `up` → H.264/AAC `probably`, webdriver false.
+
+### `up` is native Go — no node on the runtime path
+The launcher execs the browser directly with `chromium-agent-launch.cjs`'s flags, in its own session
+(setsid). **P3 background launch:** today's 12:28 node launch from a background shell died with
+`No rendezvous client`; the Go launcher started the dev build on the owner profile from the same kind
+of shell. **P3 stale lock:** a Singleton* set whose pid is dead is cleared before launch, and a browser
+that exits immediately (another instance owns the profile) is reported instead of waited on.
+
+### Pacing — read / react / mutate, per (profile, site)
+`internal/pacing`: read 3–8s, react 20–60s + 30/day, mutate 2–5 min + 10/day. Jitter is drawn once
+and stored, a file lock makes parallel lanes on one profile queue, short waits are served inline and
+anything past 120s (or a spent cap) exits **5 rate-limited** with `retry_after` before a byte reaches
+the site. A STAGED write is paced as a read. Overrides: `"pacing"` in a site file, or
+`~/.config/chrome-agent/pacing.json` per machine. `pacing <domain>` shows the budget; ledger lines now
+carry `domain` + `class`. Raw `eval`/`evalcsp` are deliberately unpaced primitives.
+
+### P2 — reactions exist in Go
+`linkedin like`, `x like`, `x repost`, `reddit upvote` — staged without `--confirm`, never toggle an
+existing reaction off, `ok` only when the state flipped. Staged runs on live pages 2026-09-14 read the
+before-state on all four; nothing has been clicked by the Go verbs yet (owner-gated).
+
+### Site knowledge reaches machines that synced before
+`sites sync` kept every changed file forever because it could not tell an old shipped copy from an
+edit. It now records what it wrote (`.shipped.json`) and upgrades untouched copies. Found when the
+fixed YouTube probe (`as: "Avatar image"`) kept running the stale installed file. All 19 `auth` probes
+ran live on the owner profile: clean verdicts everywhere; 10 unverified sites proven signed-out.
+
+---
+
 ## Still open
 
-- **The fork has never been built or run on Linux.** The CLI, the installer and the vendored
-  recipes are now proven on Ubuntu 24.04; the browser is not. That needs a Linux build (~100 GB,
-  hours) or a Linux CI artifact — a macOS build cannot be copied across. `scripts/server-install.sh` and `docs/server-ubuntu.md` exist
-  and are statically clean; the fork has never been built or started on Linux from this repo. Until
-  it is, ADR 0003 is macOS-only in fact and Linux-only in intent.
+- **Neither release has run on a second machine** (`verified_on_second_machine: false`). Linux fork.2
+  passed its gates on the build host; macOS on this Mac.
+- **`--confirm` on the Go react verbs is unexercised** — staged is proven, the click is owner-gated.
+- **reddit.com and instagram.com report signed out** on the owner profile although their files say
+  `verified` — a human sign-in, or the probe has drifted.
 - **The share's X half is the next thing to prove**: a human logging in through noVNC on a virtual
   display, then `chrome-agent auth <domain>` green on the server. The tunnel half is done.
 - **17 of 19 site definitions have an unproven signed-IN path.** They need a human session, once,

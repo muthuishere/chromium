@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deemwarhq/chrome-agent/internal/instance"
 	"github.com/deemwarhq/chrome-agent/internal/paths"
 	"github.com/deemwarhq/chrome-agent/internal/spool"
 )
@@ -182,38 +183,95 @@ func (b *Browser) EvalJSON(js string, timeout time.Duration, out any) error {
 
 // Up launches the browser if nothing is servicing the spool.
 //
-// The launcher is still node (chromium-agent-launch.cjs in the fork). That is the ONE place this
-// client shells out to a runtime: the client itself needs nothing installed, but starting the
-// browser does, until the engine grows a native launcher.
+// It execs the browser DIRECTLY — the node launcher (chromium-agent-launch.cjs) is gone from the
+// runtime path, so a machine needs this binary and an installed engine, nothing else. The flags are
+// that launcher's, unchanged; each one fixed something (see LaunchArgs).
 func (b *Browser) Up(url string, headless bool) error {
 	if b.Alive() {
 		return nil
+	}
+	if err := paths.RequireBinary(); err != nil {
+		return err
+	}
+	bin, _ := paths.Binary()
+	if err := os.MkdirAll(b.Spool, 0o755); err != nil {
+		return err
 	}
 	if _, err := spool.New(b.Spool).Sweep(5 * time.Minute); err != nil && !os.IsNotExist(err) {
 		// A sweep failure is not fatal; a replayed stale command would be.
 		fmt.Fprintf(os.Stderr, "spool sweep: %v\n", err)
 	}
-	cmd := exec.Command("node", paths.Launcher(), url)
-	cmd.Env = append(os.Environ(),
-		"CHROMIUM_AGENT_PROFILE="+b.Profile,
-		"CHROMIUM_SENDKEYS_DIR="+b.Spool,
-	)
-	if headless {
-		cmd.Env = append(cmd.Env, "CHROMIUM_AGENT_HEADLESS=1")
+	if err := clearStaleLock(b.Profile); err != nil {
+		return err
 	}
-	log, err := os.Create(paths.LaunchLogFor(b.Profile))
-	if err == nil {
+	logPath := paths.LaunchLogFor(b.Profile)
+	cmd := exec.Command(bin, LaunchArgs(b.Profile, url, headless)...)
+	// The watcher refuses to start without its spool dir, and reads it from this variable only.
+	cmd.Env = append(os.Environ(), "CHROMIUM_SENDKEYS_DIR="+b.Spool)
+	if log, err := os.Create(logPath); err == nil {
 		cmd.Stdout, cmd.Stderr = log, log
+		defer log.Close()
 	}
+	detach(cmd) // the browser must outlive this CLI invocation
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("could not start the launcher (%s): %w", paths.Launcher(), err)
+		return fmt.Errorf("could not start %s: %w", bin, err)
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	pid := cmd.Process.Pid
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if b.Alive() {
 			return nil
 		}
-		time.Sleep(time.Second)
+		select {
+		case err := <-exited:
+			// Chromium exits 0 when it hands the URL to an ALREADY-RUNNING instance of this profile
+			// ("Opening in existing browser session."). That instance was not started with this spool,
+			// so nothing will ever answer — say it, instead of waiting out the deadline.
+			return fmt.Errorf("the browser (pid %d) exited immediately (%v) — if another browser already has %s open without this spool, close it first; see %s", pid, err, b.Profile, logPath)
+		case <-time.After(time.Second):
+		}
 	}
-	return fmt.Errorf("the browser did not come up within 30s — see %s", paths.LaunchLogFor(b.Profile))
+	return fmt.Errorf("the browser did not come up within 45s — see %s", logPath)
+}
+
+// LaunchArgs is the flag set chromium-agent-launch.cjs used, carried over verbatim.
+func LaunchArgs(profile, url string, headless bool) []string {
+	args := []string{
+		"--user-data-dir=" + profile,
+		// One predictable window/tab: no welcome tab, no default-browser prompt, no crash-restore
+		// bubble. Without these the first-run tab becomes the tab the watcher targets.
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-session-crashed-bubble",
+		"--hide-crash-restore-bubble",
+		// Auto-grant mic/camera (no dialog) so the per-tab audio/video verbs can select devices.
+		"--use-fake-ui-for-media-stream",
+	}
+	if headless {
+		// Modern headless: the full browser, no window.
+		args = append(args, "--headless=new")
+	}
+	if url != "" {
+		args = append(args, url)
+	}
+	return args
+}
+
+// clearStaleLock removes the Singleton* files a KILLED browser leaves behind. With them present the
+// next launch says "Opening in existing browser session.", exits 0, and nothing services the spool —
+// the silent no-op from INPROGRESS P3. A lock whose pid is ALIVE is a real browser and is left alone.
+func clearStaleLock(profile string) error {
+	if !instance.StaleLock(profile) {
+		return nil
+	}
+	for _, f := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
+		if err := os.Remove(filepath.Join(profile, f)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("stale %s in %s could not be removed: %w", f, profile, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "chrome-agent: cleared a stale SingletonLock in %s (a killed browser left it)\n", profile)
+	return nil
 }

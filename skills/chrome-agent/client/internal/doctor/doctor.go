@@ -22,7 +22,7 @@ import (
 )
 
 type Report struct {
-	Fork    ForkInfo          `json:"fork"`
+	Browser BrowserInfo       `json:"browser"`
 	Profile ProfileInfo       `json:"profile"`
 	Spool   SpoolInfo         `json:"spool"`
 	Tools   map[string]bool   `json:"tools"`
@@ -33,13 +33,14 @@ type Report struct {
 	Notes   []string          `json:"notes,omitempty"`
 }
 
-type ForkInfo struct {
-	Path     string `json:"path"`
-	Present  bool   `json:"present"`
-	CLI      bool   `json:"cli"`
-	Launcher bool   `json:"launcher"`
-	Binary   string `json:"binary"`
-	Built    bool   `json:"built"`
+// BrowserInfo is WHICH browser this machine would launch, and which rule found it. There is no fork
+// requirement any more: an installed engine is the normal case, a fork build the dev one.
+type BrowserInfo struct {
+	Binary     string `json:"binary"`
+	ResolvedBy string `json:"resolved_by"` // env | engine | fork | none
+	Present    bool   `json:"present"`
+	EngineDir  string `json:"engine_dir"`
+	Fork       string `json:"fork"`
 }
 
 type ProfileInfo struct {
@@ -72,15 +73,13 @@ func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 func Run() Report {
 	r := Report{Tools: map[string]bool{}, Sites: map[string]string{}}
 
-	bin := paths.ForkBinary()
-	fi, err := os.Stat(bin)
-	r.Fork = ForkInfo{
-		Path:     paths.Fork(),
-		Present:  exists(paths.Fork()),
-		CLI:      exists(paths.SpoolClient()),
-		Launcher: exists(paths.Launcher()),
-		Binary:   bin,
-		Built:    err == nil && fi.Mode()&0o111 != 0,
+	bin, by := paths.Binary()
+	r.Browser = BrowserInfo{
+		Binary:     bin,
+		ResolvedBy: by,
+		Present:    paths.RequireBinary() == nil,
+		EngineDir:  paths.EngineDir(),
+		Fork:       paths.Fork(),
 	}
 
 	prof := paths.Profile()
@@ -101,18 +100,16 @@ func Run() Report {
 	r.Spool = SpoolInfo{Path: sp, Exists: exists(sp)}
 	r.Sites["dir"] = paths.SitesDir()
 
-	for _, t := range []string{"node", "python3", "cloudflared", "Xvfb", "x11vnc"} {
+	for _, t := range []string{"cloudflared", "Xvfb", "x11vnc"} {
 		_, err := exec.LookPath(t)
 		r.Tools[t] = err == nil
 	}
 
 	r.Engine = probeEngine(sp)
 
-	if !r.Fork.CLI || !r.Fork.Launcher {
-		r.Missing = append(r.Missing, "fork (set CHROME_AGENT_FORK)")
-	}
-	if !r.Fork.Built {
-		r.Missing = append(r.Missing, "built binary (autoninja -C out/Default chrome)")
+	// A browser that is already RUNNING is enough to work; a missing install only blocks `up`.
+	if !r.Browser.Present && !r.Engine.Running {
+		r.Missing = append(r.Missing, "browser (run: chrome-agent engine install)")
 	}
 	if len(r.Engine.TooOldFor) > 0 {
 		r.Missing = append(r.Missing, "engine capabilities (fork predates this client)")

@@ -19,7 +19,7 @@
   },
   "auth": {
     "probe_url": "https://www.youtube.com/",
-    "probe_js": "// YouTube states it itself: ytcfg.data_.LOGGED_IN. Cookies are the wrong evidence here — the\n// readable ones (PREF, __Secure-3PAPISID) are present on a SIGNED-OUT page too, and the ones that\n// mean anything (LOGIN_INFO, SAPISID) are HttpOnly. Verified signed-out here 2026-09-12.\nconst img = document.querySelector('#avatar-btn img, ytd-topbar-menu-button-renderer img');\nconst cfg = (window.ytcfg && window.ytcfg.data_) ? window.ytcfg.data_ : null;\nif (cfg && typeof cfg.LOGGED_IN === 'boolean') {\n  return cfg.LOGGED_IN ? {signed_in:true, as: img && img.alt ? img.alt : undefined}\n                       : {signed_in:false, why:'ytcfg.LOGGED_IN is false'};\n}\nreturn img ? {signed_in:true, as: img.alt || undefined}\n           : {signed_in:false, why:'no ytcfg verdict and no avatar button'};"
+    "probe_js": "// YouTube states it itself: ytcfg.data_.LOGGED_IN. Cookies are the wrong evidence here — the\n// readable ones (PREF, __Secure-3PAPISID) are present on a SIGNED-OUT page too, and the ones that\n// mean anything (LOGIN_INFO, SAPISID) are HttpOnly. Verified signed-out here 2026-09-12.\nconst img = document.querySelector('#avatar-btn img, ytd-topbar-menu-button-renderer img');\n// TRAP (2026-09-14): the avatar <img> alt is the generic string \"Avatar image\", not the account\n// name — reporting it as `as` names nobody. Only a non-generic alt counts.\nconst name = img && img.alt && !/^avatar( image)?$/i.test(img.alt.trim()) ? img.alt : undefined;\nconst cfg = (window.ytcfg && window.ytcfg.data_) ? window.ytcfg.data_ : null;\nif (cfg && typeof cfg.LOGGED_IN === 'boolean') {\n  return cfg.LOGGED_IN ? {signed_in:true, as: name}\n                       : {signed_in:false, why:'ytcfg.LOGGED_IN is false'};\n}\nreturn img ? {signed_in:true, as: name}\n           : {signed_in:false, why:'no ytcfg verdict and no avatar button'};"
   },
   "read": {
     "verb": "youtube:channel-videos",
@@ -35,5 +35,6 @@
   ],
   "status": "verified",
   "source": "hand",
-  "notes": "Converted from the CLI's `_auth_probe_js` case branch, `_verify_fixture` (youtube:channel-videos | /results?search_query=chromium) and playbooks/youtube.com/. Read verified 2026-09-12 via recipe:youtube:channel-videos; the same probe reported signed-OUT live on 2026-09-12, which is a working probe, not a broken one. Read-only here."
+  "notes": "Converted from the CLI's `_auth_probe_js` case branch, `_verify_fixture` (youtube:channel-videos | /results?search_query=chromium) and playbooks/youtube.com/. Read verified 2026-09-12 via recipe:youtube:channel-videos; the same probe reported signed-OUT live on 2026-09-12, which is a working probe, not a broken one. Read-only here.",
+  "probe_checked": "2026-09-14: signed-IN path observed live (ytcfg.LOGGED_IN true); the alt-text `as` bug found and fixed the same day."
 }

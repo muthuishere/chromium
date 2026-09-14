@@ -15,12 +15,14 @@ import (
 	"github.com/deemwarhq/chrome-agent/internal/browser"
 	"github.com/deemwarhq/chrome-agent/internal/cookies"
 	"github.com/deemwarhq/chrome-agent/internal/doctor"
+	"github.com/deemwarhq/chrome-agent/internal/engine"
 	"github.com/deemwarhq/chrome-agent/internal/exit"
 	"github.com/deemwarhq/chrome-agent/internal/identity"
 	"github.com/deemwarhq/chrome-agent/internal/install"
 	"github.com/deemwarhq/chrome-agent/internal/instance"
 	"github.com/deemwarhq/chrome-agent/internal/learned"
 	"github.com/deemwarhq/chrome-agent/internal/ledger"
+	"github.com/deemwarhq/chrome-agent/internal/pacing"
 	"github.com/deemwarhq/chrome-agent/internal/paths"
 	"github.com/deemwarhq/chrome-agent/internal/profile"
 	"github.com/deemwarhq/chrome-agent/internal/recipes"
@@ -80,19 +82,22 @@ func main() {
 	case "install":
 		installCmd(rest)
 		return
+	case "engine":
+		engineCmd(rest)
+		return
+	case "pacing":
+		pacingCmd(rest)
+		return
 	case "help", "-h", "--help":
 		usage()
 		return
 	}
 
-	// Everything below drives the browser, so the fork has to exist. Checking HERE rather than deep
-	// in a helper is deliberate: a failure inside a subprocess or a pipeline gets its exit code and
-	// its JSON swallowed, which is exactly how a missing fork used to present as silence.
-	if err := paths.RequireFork(); err != nil {
-		exit.Die(exit.Browser, "fork-missing", err.Error())
-	}
-
+	// Everything below drives the browser. There is no fork requirement: a RUNNING browser is
+	// enough, and `up`/`login` check for an installed one (paths.RequireBinary) and name the fix.
 	switch verb {
+	case "up":
+		upCmd(rest)
 	case "doctor":
 		runDoctor()
 	case "instances":
@@ -122,6 +127,9 @@ func main() {
 	case "verify":
 		verifyCmd(rest)
 	default:
+		if siteVerb(verb, rest) {
+			return
+		}
 		exit.Die(exit.Usage, "unknown-verb", fmt.Sprintf("unknown verb %q — run `chrome-agent help`", verb))
 	}
 }
@@ -146,6 +154,7 @@ func hello() {
 		"client":   "chrome-agent",
 		"version":  version,
 		"protocol": Protocol,
+		"browser":  func() string { b, _ := paths.Binary(); return b }(),
 		"fork":     paths.Fork(),
 		"profile":  paths.Profile(),
 		"spool":    paths.Spool(),
@@ -338,7 +347,9 @@ func liveBrowser() *browser.Browser {
 
 func authCmd(args []string) {
 	d := domainArg(args, "auth")
-	v, err := identity.Auth(liveBrowser(), d)
+	b := liveBrowser()
+	beforeAction(d, pacing.Read, false)
+	v, err := identity.Auth(b, d)
 	if err != nil {
 		exit.Die(exit.Usage, "no-probe", err.Error())
 	}
@@ -385,6 +396,7 @@ func gotoCmd(args []string) {
 		}
 	}
 	b := liveBrowser()
+	beforeAction(hostOf(args[0]), pacing.Read, false)
 	if err := b.Goto(args[0], settle); err != nil {
 		exit.Die(exit.Browser, "goto-failed", err.Error())
 	}
@@ -454,7 +466,10 @@ func recipeCmd(args []string) {
 	if len(args) > 1 {
 		optsJSON = args[1]
 	}
-	v, err := recipes.Run(liveBrowser(), args[0], optsJSON, recipes.Options{})
+	b := liveBrowser()
+	domain, class, confirm := recipeClass(args[0], optsJSON)
+	beforeAction(domain, class, confirm)
+	v, err := recipes.Run(b, args[0], optsJSON, recipes.Options{})
 	if err != nil {
 		exit.Die(exit.Site, "recipe-failed", err.Error())
 	}
@@ -470,7 +485,9 @@ func readCmd(args []string) {
 	if len(args) > 1 {
 		generic = args[1]
 	}
-	res, err := recipes.Read(liveBrowser(), args[0], generic)
+	b := liveBrowser()
+	beforeAction(args[0], pacing.Read, false)
+	res, err := recipes.Read(b, args[0], generic)
 	if err != nil {
 		exit.Die(exit.Site, "read-failed", err.Error())
 	}
@@ -484,6 +501,7 @@ func verifyCmd(args []string) {
 		exit.Die(exit.Usage, "usage", "verify <domain>")
 	}
 	b := liveBrowser()
+	beforeAction(args[0], pacing.Read, false)
 	res, err := recipes.Verify(b, args[0], func(domain string) error {
 		v, err := identity.Auth(b, domain)
 		if err != nil {
@@ -588,6 +606,13 @@ func installCmd(args []string) {
 		}
 	}
 	res, err := install.Install(bin)
+	if err == nil && contains(args, "--engine") {
+		eres, eerr := engine.Install(contains(args, "--force"), os.Stderr)
+		if eerr != nil {
+			exit.Die(exit.Browser, "engine-install-failed", eerr.Error())
+		}
+		out(eres)
+	}
 	if err != nil {
 		exit.Die(exit.Usage, "install-failed", err.Error())
 	}
@@ -598,7 +623,9 @@ func installCmd(args []string) {
 // but it must not be invisible either.
 func logQuietly(action, target string, result any) {
 	b, _ := json.Marshal(result)
-	if _, err := ledger.Append(browser.AgentID(), action, target, string(b)); err != nil {
+	e := &ledger.Entry{Profile: paths.Profile(), Agent: browser.AgentID(), Action: action, Target: target,
+		Result: string(b), Domain: paced.domain, Class: paced.class}
+	if err := ledger.AppendEntry(e); err != nil {
 		fmt.Fprintf(os.Stderr, "ledger: %v\n", err)
 	}
 }
@@ -713,6 +740,48 @@ func tabsCmd(args []string) {
 	out(map[string]any{"closed": closed, "forgot": len(plan.Forget), "unowned_left_alone": plan.Unowned})
 }
 
+// engineCmd installs and reports the published browser build. It never touches a running browser.
+func engineCmd(args []string) {
+	sub := "status"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "install", "update":
+		res, err := engine.Install(contains(args, "--force"), os.Stderr)
+		if err != nil {
+			exit.Die(exit.Browser, "engine-install-failed", err.Error())
+		}
+		out(res)
+	case "status":
+		out(engine.StatusOf(contains(args, "--check")))
+	case "path":
+		b, _ := paths.Binary()
+		fmt.Println(b)
+	default:
+		exit.Die(exit.Usage, "usage", "engine install [--force] | engine status [--check] | engine path")
+	}
+}
+
+// upCmd starts THIS profile's browser (no-op when one already answers its spool).
+func upCmd(args []string) {
+	url, headless := "", contains(args, "--headless") || os.Getenv("CHROME_AGENT_HEADLESS") == "1"
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			url = a
+			break
+		}
+	}
+	b := browser.New()
+	already := b.Alive()
+	if err := b.Up(url, headless); err != nil {
+		exit.Die(exit.Browser, "up-failed", err.Error())
+	}
+	bin, by := paths.Binary()
+	out(map[string]any{"ok": true, "already_running": already, "profile": b.Profile, "spool": b.Spool,
+		"binary": bin, "resolved_by": by, "headless": headless})
+}
+
 func usage() {
 	fmt.Print(`chrome-agent — client for the undetectable chromium fork (Go; ADR 0010 slice 1)
 
@@ -720,7 +789,7 @@ func usage() {
   status                     webdriver + current url, through the live engine
   instances [--probe]        which browsers exist, and which answer
   hello | version            client version + protocol
-  exit-codes [--json]        0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused
+  exit-codes [--json]        0 ok · 1 usage · 2 not signed in · 3 browser down · 4 site refused · 5 rate-limited
   profile | spool            which profile/spool this invocation resolves to
 
   auth <domain>              read-only {signed_in, as?} — exit 0 yes, 2 no
@@ -734,13 +803,20 @@ func usage() {
   profile [create <dir> | list | delete <dir> [--yes]]
   note <domain> "<learned>" | promote [<domain>] [--apply]
   ledger status|rotate       the audit trail and its rotation
-  install [bindir]           assets + CLI onto PATH
+  install [bindir] [--engine] assets + CLI onto PATH (--engine also downloads the browser)
+  engine install [--force]   download + verify + unpack the published browser (linux x64, macOS arm64)
+  engine status [--check] | engine path
+  up [url] [--headless]      start THIS profile's browser (clears a stale SingletonLock first)
+  pacing <domain>            read/react/mutate budget for this profile on a site
+  linkedin like [url] | x like <url> | x repost <url> | reddit upvote <url>   [--confirm]
   cookies export <domain> --out F [--pass P] | cookies import --in F [--pass P]
   tabs list | tabs reap [--idle 24h] [--yes]   close idle SESSION tabs; never a human's
   goto <url> [settle]        navigate THIS session's tab
   eval | evalcsp '<js>'      run JS in it (evalcsp survives strict script-src)
 
-Fork: $CHROME_AGENT_FORK (default ~/muthu/gitworkspace/chromium)
-Slices 1-3 of the Go port: no node, no python3. Streams and cookies are next (ADR 0009/0011).
+Browser: $CHROMIUM_SENDKEYS_OUT > installed engine ($CHROME_AGENT_ENGINE_DIR) > $CHROME_AGENT_FORK/out/Default
+Pacing: every site verb is spaced per (profile, site) — read 3-8s · react 20-60s, 30/day · mutate 2-5min, 10/day.
+  Waits up to 120s inline, else exits 5 with retry_after. Override per site in the site file "pacing",
+  or per machine in ~/.config/chrome-agent/pacing.json. No node, no python3.
 `)
 }

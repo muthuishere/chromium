@@ -150,7 +150,11 @@ chrome-agent logout <domain>               # end THIS site's session; verifies w
 chrome-agent sites list|show <d>|path <d>|validate|sync [--force]
 chrome-agent profile list | delete <dir> [--yes]
 chrome-agent read <domain> [generic:recipe]  # read ANY known site: its recipe, or the generic reader
-chrome-agent install [bindir]              # sites -> ~/.config/chrome-agent/sites (editable), CLI -> PATH
+chrome-agent install [bindir] [--engine]   # sites -> ~/.config/chrome-agent/sites (editable), CLI -> PATH
+chrome-agent engine install [--force]      # download + verify the browser (linux x64 / macOS arm64) — no fork needed
+chrome-agent engine status [--check]       # what is installed, which binary `up` will use, is it latest
+chrome-agent up [url] [--headless]         # start THIS profile's browser (native, clears a stale lock)
+chrome-agent pacing <domain>               # read/react/mutate budget left for this profile on a site
 chrome-agent ledger status|rotate          # the audit trail and its rotation
 chrome-agent doctor                        # can this machine run anything at all?
 chrome-agent share start|status|stop       # time-boxed remote login window (server, ADR 0003)
@@ -159,7 +163,12 @@ chrome-agent note <domain> "<learned>"     # capture site knowledge the moment y
 chrome-agent promote [<domain>] [--apply] [--notes-only]   # learned -> canon, as a review
 chrome-agent profile create <dir>          # make a profile, do not launch
 chrome-agent profile | spool               # which profile/spool this invocation resolves to
-chrome-agent exit-codes [--json]           # the exit-code contract
+chrome-agent exit-codes [--json]           # the exit-code contract (5 = rate-limited: retry_after, nothing sent)
+
+# PACING — every site verb (goto/read/verify/auth/recipe/like/repost/upvote) is spaced per (profile, site):
+#   read 3-8s · react 20-60s, 30/day · mutate 2-5min, 10/day. Waits <=120s inline; longer or a spent
+#   cap exits 5 with retry_after_seconds. NEVER loop-retry a 5 on a write — schedule the retry.
+#   Staged writes (no --confirm) count as reads. Override: site file "pacing" or ~/.config/chrome-agent/pacing.json.
 
 # fast-learning:
 chrome-agent capture arm|dump|clear        # learn a site's REAL api: arm, act by hand, dump

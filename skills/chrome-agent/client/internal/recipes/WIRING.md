@@ -98,3 +98,18 @@ bash CLI. They appear in `List()` (dropping them would tell a generator that rea
 — that regression already shipped once) and `Run` refuses them with an error naming the bash verb.
 `hackernews:top` and `hackernews:item` ARE implemented here. When the like/upvote verbs are ported,
 fill in `builtins[].js` and `Run` starts serving them with no other change.
+
+## React verbs — `chrome-agent linkedin like | x like | x repost | reddit upvote`
+
+```go
+domain, ok := recipes.IsReact(key)                  // "linkedin:like" -> "linkedin.com"
+res, err := recipes.React(b, key, url, confirm)     // map[string]any
+```
+
+Wired by `cmd/chrome-agent/sitecmd.go` (`siteVerb`). `recipe linkedin:like` REFUSES and names the
+site verb: a react is navigate -> read -> click -> re-read, not one page body, and the `recipe` path
+would skip the pacing hook. Every `Recipe` now carries `class` ("read" | "react" | "mutate");
+`recipes --json` serves it. Without confirm the result is `{staged:true, before}`; confirmed on a
+control already in the target state it is `{already:true}` and nothing is clicked (that click would
+be an unlike); otherwise `{ok, before, after, verified}` with ok==verified. `ErrUsage` marks a
+failure where nothing was attempted.

@@ -13,8 +13,11 @@
 package sites
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/deemwarhq/chrome-agent/internal/pacing"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -60,6 +63,10 @@ type Definition struct {
 	Source       string   `json:"source,omitempty"`
 	Notes        string   `json:"notes,omitempty"`
 	ProbeChecked string   `json:"probe_checked,omitempty"`
+
+	// Pacing overrides the builtin gaps/caps for this site, per class (read|react|mutate). Absent
+	// means the defaults in internal/pacing; ~/.config/chrome-agent/pacing.json outranks this.
+	Pacing map[string]pacing.Policy `json:"pacing,omitempty"`
 
 	// Where this definition came from — "override" | "installed" | "embedded".
 	From string `json:"-"`
@@ -210,6 +217,14 @@ func Problems(d *Definition) []string {
 			out = append(out, "auth.probe_js reads document.cookie without try/catch — it raises SecurityError on an opaque origin and the probe would throw")
 		}
 	}
+	for class, p := range d.Pacing {
+		if !pacing.ValidClass(class) {
+			out = append(out, fmt.Sprintf("pacing.%s: class must be read|react|mutate", class))
+		}
+		if p.MinSeconds < 0 || p.MaxSeconds < 0 || p.DailyCap < 0 || (p.MaxSeconds > 0 && p.MaxSeconds < p.MinSeconds) {
+			out = append(out, fmt.Sprintf("pacing.%s: needs 0 <= min_seconds <= max_seconds and daily_cap >= 0", class))
+		}
+	}
 	switch d.Logout.Method {
 	case "", "url", "dom", "cookies":
 	default:
@@ -228,18 +243,32 @@ type SyncResult struct {
 	InstalledDir string   `json:"installed_dir"`
 	Installed    []string `json:"installed"`
 	Replaced     []string `json:"replaced"`
+	Upgraded     []string `json:"upgraded"`
 	Kept         []string `json:"kept"`
 	Unchanged    []string `json:"unchanged"`
 	Force        bool     `json:"force"`
 	DryRun       bool     `json:"dry_run"`
 }
 
-// Sync writes the embedded definitions into the installed dir. A locally edited file is KEPT unless
-// force says otherwise, and the result names what it left alone.
+// ShippedRecord remembers the sha256 of every file sync WROTE. It is what lets sync tell an operator's
+// edit from a copy that is merely old: before it existed, every site fix shipped in a new binary was
+// "kept" on every machine that had ever synced, forever — found 2026-09-14 when a fixed YouTube probe
+// kept running the broken installed copy.
+const ShippedRecord = ".shipped.json"
+
+// Sync writes the embedded definitions into the installed dir.
+//
+//   - missing                          -> installed
+//   - identical                        -> unchanged
+//   - untouched since sync wrote it    -> upgraded (it is our old copy, not an edit)
+//   - anything else                    -> KEPT (an operator edited it), unless force
+//
+// A file installed before the record existed has no hash to compare, so it is kept once; `--force`
+// (after checking it has no local edits) or deleting it brings it back under the record.
 func Sync(force, dry bool) (*SyncResult, error) {
 	dst := filepath.Join(paths.ConfigDir(), "sites")
 	res := &SyncResult{InstalledDir: dst, Force: force, DryRun: dry,
-		Installed: []string{}, Replaced: []string{}, Kept: []string{}, Unchanged: []string{}}
+		Installed: []string{}, Replaced: []string{}, Upgraded: []string{}, Kept: []string{}, Unchanged: []string{}}
 	if !dry {
 		if err := os.MkdirAll(dst, 0o755); err != nil {
 			return nil, err
@@ -248,6 +277,16 @@ func Sync(force, dry bool) (*SyncResult, error) {
 	entries, err := embedded.ReadDir(embedRoot)
 	if err != nil {
 		return nil, err
+	}
+	record := map[string]string{}
+	if b, err := os.ReadFile(filepath.Join(dst, ShippedRecord)); err == nil {
+		_ = json.Unmarshal(b, &record)
+	}
+	write := func(target string, data []byte) error {
+		if dry {
+			return nil
+		}
+		return os.WriteFile(target, data, 0o644)
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -261,30 +300,45 @@ func Sync(force, dry bool) (*SyncResult, error) {
 		cur, err := os.ReadFile(target)
 		switch {
 		case err != nil:
-			if !dry {
-				if err := os.WriteFile(target, want, 0o644); err != nil {
-					return nil, err
-				}
+			if err := write(target, want); err != nil {
+				return nil, err
 			}
 			res.Installed = append(res.Installed, e.Name())
 		case string(cur) == string(want):
 			res.Unchanged = append(res.Unchanged, e.Name())
+		case record[e.Name()] != "" && record[e.Name()] == sha(cur):
+			if err := write(target, want); err != nil {
+				return nil, err
+			}
+			res.Upgraded = append(res.Upgraded, e.Name())
 		case force:
-			if !dry {
-				if err := os.WriteFile(target, want, 0o644); err != nil {
-					return nil, err
-				}
+			if err := write(target, want); err != nil {
+				return nil, err
 			}
 			res.Replaced = append(res.Replaced, e.Name())
 		default:
 			res.Kept = append(res.Kept, e.Name())
+			continue
+		}
+		record[e.Name()] = sha(want)
+	}
+	if !dry {
+		b, _ := json.MarshalIndent(record, "", "  ")
+		if err := os.WriteFile(filepath.Join(dst, ShippedRecord), b, 0o644); err != nil {
+			return nil, err
 		}
 	}
 	sort.Strings(res.Installed)
 	sort.Strings(res.Replaced)
+	sort.Strings(res.Upgraded)
 	sort.Strings(res.Kept)
 	sort.Strings(res.Unchanged)
 	return res, nil
+}
+
+func sha(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // Shadowed returns definitions that exist but are OUTRANKED by a higher-priority copy. They are not

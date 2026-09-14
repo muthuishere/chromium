@@ -15,11 +15,12 @@ import (
 	"strings"
 )
 
-// Fork is the chromium fork this CLI drives.
+// Fork is a chromium checkout with a build in it. It is the DEV fallback only: a machine that ran
+// `chrome-agent engine install` never needs one.
 //
-// The path used to be hardcoded, which was the entire reason a `browser:` identity could not ship
-// to anyone else. CHROME_AGENT_FORK overrides it; the owner's checkout stays the default so nothing
-// on that machine changes.
+// The path used to be hardcoded AND required, which was the entire reason a `browser:` identity
+// could not ship to anyone else. CHROME_AGENT_FORK overrides it; the owner's checkout stays the
+// default so a dev build on that machine keeps working.
 func Fork() string {
 	if v := os.Getenv("CHROME_AGENT_FORK"); v != "" {
 		return strings.TrimRight(v, "/")
@@ -28,46 +29,61 @@ func Fork() string {
 	return filepath.Join(home, "muthu/gitworkspace/chromium")
 }
 
-func SpoolClient() string { return filepath.Join(Fork(), "chromesendkeys.cjs") }
-func Launcher() string    { return filepath.Join(Fork(), "chromium-agent-launch.cjs") }
-
-// ForkBinary resolves the built browser exactly the way chromium-agent-launch.cjs does.
-// darwin ships an .app bundle; linux and friends ship a bare executable in the out dir.
-func ForkBinary() string {
-	out := os.Getenv("CHROMIUM_SENDKEYS_OUT")
-	if out == "" {
-		out = filepath.Join(Fork(), "out", "Default")
+// EngineDir is where `chrome-agent engine install` (and dist/install.sh) unpack the published build.
+func EngineDir() string {
+	if v := os.Getenv("CHROME_AGENT_ENGINE_DIR"); v != "" {
+		return strings.TrimRight(v, "/")
 	}
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(out, "Chromium.app", "Contents", "MacOS", "Chromium")
-	}
-	return filepath.Join(out, "chrome")
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "chrome-agent", "engine")
 }
 
-// RequireFork fails with the MISSING FILE NAMED, not a stack trace from three frames down.
-func RequireFork() error {
-	var missing []string
-	for _, p := range []string{SpoolClient(), Launcher()} {
-		if _, err := os.Stat(p); err != nil {
-			missing = append(missing, p)
-		}
+// BinaryIn is the browser inside an out dir or an unpacked engine. darwin ships an .app bundle;
+// linux ships a bare executable. Same layout the build tree and the release tarballs both use.
+func BinaryIn(dir string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(dir, "Chromium.app", "Contents", "MacOS", "Chromium")
 	}
-	if len(missing) == 0 {
-		return nil
+	return filepath.Join(dir, "chrome")
+}
+
+// Binary resolves the browser to launch, and says which rule found it:
+//
+//	env    CHROMIUM_SENDKEYS_OUT — an explicit out dir always wins
+//	engine the installed release (chrome-agent engine install)
+//	fork   <fork>/out/Default — a dev build
+//
+// When nothing exists it returns the ENGINE path, because that is the one a new machine should get.
+func Binary() (path, source string) {
+	if out := os.Getenv("CHROMIUM_SENDKEYS_OUT"); out != "" {
+		return BinaryIn(strings.TrimRight(out, "/")), "env"
 	}
-	return fmt.Errorf("chromium fork not found at %s (missing: %s) — set CHROME_AGENT_FORK to your checkout of the fork, or clone and build it",
-		Fork(), strings.Join(missing, ", "))
+	if b := BinaryIn(EngineDir()); isExecutable(b) {
+		return b, "engine"
+	}
+	if b := BinaryIn(filepath.Join(Fork(), "out", "Default")); isExecutable(b) {
+		return b, "fork"
+	}
+	return BinaryIn(EngineDir()), "none"
+}
+
+func isExecutable(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
 var ErrNotBuilt = errors.New("not built")
 
+// RequireBinary fails with the fix NAMED, not a stack trace from three frames down.
 func RequireBinary() error {
-	b := ForkBinary()
-	fi, err := os.Stat(b)
-	if err != nil || fi.Mode()&0o111 == 0 {
-		return fmt.Errorf("the fork at %s has no built binary at %s — build it: autoninja -C out/Default chrome", Fork(), b)
+	b, src := Binary()
+	if isExecutable(b) {
+		return nil
 	}
-	return nil
+	if src == "env" {
+		return fmt.Errorf("CHROMIUM_SENDKEYS_OUT points at %s, which has no browser — unset it or build there", b)
+	}
+	return fmt.Errorf("no browser installed (looked in %s and %s/out/Default) — run: chrome-agent engine install", EngineDir(), Fork())
 }
 
 // Profile is the browser profile this invocation acts as. The trailing slash is stripped HERE, once,

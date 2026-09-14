@@ -71,6 +71,10 @@ type Entry struct {
 	Action  string `json:"action"`
 	Target  string `json:"target"`
 	Result  string `json:"result"`
+	// Domain and Class say which site budget an action spent (internal/pacing). Empty on lines
+	// written before pacing existed, and on actions that are not paced (eval, tabs reap).
+	Domain string `json:"domain,omitempty"`
+	Class  string `json:"class,omitempty"`
 }
 
 // Append writes one line and rolls the file if it has outgrown MaxBytes.

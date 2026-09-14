@@ -18,6 +18,7 @@ const (
 	Auth    = 2 // no valid session for that site — a human must sign in
 	Browser = 3 // no fork, no build, or no browser servicing the spool
 	Site    = 4 // the browser worked and the site said no
+	Paced   = 5 // pacing refused: too soon, or the daily cap is spent — retry_after says when
 )
 
 // Code is the machine-readable contract, served by `chrome-agent exit-codes --json`.
@@ -34,6 +35,7 @@ func Table() []Code {
 		{Auth, "not-signed-in", "the profile has no valid session for that site — a human must sign in"},
 		{Browser, "browser-unreachable", "no fork, no build, or no browser servicing the spool"},
 		{Site, "site-refused", "the browser worked and the site said no"},
+		{Paced, "rate-limited", "pacing refused the action (too soon, or today's cap is spent); nothing was sent — retry after retry_after_seconds"},
 	}
 }
 

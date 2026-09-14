@@ -1,6 +1,7 @@
 package sites
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,5 +109,38 @@ func TestSyncKeepsALocallyEditedFile(t *testing.T) {
 	res, _ = Sync(true, false)
 	if len(res.Replaced) != 1 {
 		t.Fatalf("--force did not replace the edited file: %+v", res.Replaced)
+	}
+}
+
+// An old shipped copy nobody edited must be UPGRADED, not kept. Without the record, a fixed probe in
+// a new binary never reached any machine that had synced before (the YouTube "Avatar image" bug).
+func TestSyncUpgradesAnUneditedOldCopyButKeepsAnEdit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if _, err := Sync(false, false); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".config", "chrome-agent", "sites")
+	old := []byte(`{"domain":"x.com","home":"old","auth":{"probe_js":"return {}"},"status":"unverified"}`)
+	os.WriteFile(filepath.Join(dir, "x.com.json"), old, 0o644)
+	// As if an OLDER binary's sync had written that content.
+	rec := map[string]string{}
+	b, _ := os.ReadFile(filepath.Join(dir, ShippedRecord))
+	json.Unmarshal(b, &rec)
+	rec["x.com.json"] = sha(old)
+	b, _ = json.Marshal(rec)
+	os.WriteFile(filepath.Join(dir, ShippedRecord), b, 0o644)
+	// And an operator edit on another file, which the record does not vouch for.
+	os.WriteFile(filepath.Join(dir, "reddit.com.json"), []byte(`{"edited":true}`), 0o644)
+
+	res, err := Sync(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Upgraded) != 1 || res.Upgraded[0] != "x.com.json" {
+		t.Fatalf("unedited old copy not upgraded: %+v", res)
+	}
+	if len(res.Kept) != 1 || res.Kept[0] != "reddit.com.json" {
+		t.Fatalf("operator edit not kept: %+v", res)
 	}
 }

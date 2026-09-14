@@ -51,25 +51,48 @@ func TestLaunchLogFollowsTheSameRule(t *testing.T) {
 	}
 }
 
-func TestForkOverrideAndMissingForkIsNamed(t *testing.T) {
-	t.Setenv("CHROME_AGENT_FORK", "/tmp/definitely-not-a-fork")
-	if Fork() != "/tmp/definitely-not-a-fork" {
-		t.Fatalf("CHROME_AGENT_FORK ignored: %q", Fork())
-	}
-	err := RequireFork()
-	if err == nil {
-		t.Fatal("a missing fork must be an error")
-	}
-	// The error has to NAME the missing file. "file not found" from three frames down is the thing
-	// this replaced.
-	if !strings.Contains(err.Error(), "chromesendkeys.cjs") {
-		t.Fatalf("error does not name the missing file: %v", err)
+func TestForkOverride(t *testing.T) {
+	t.Setenv("CHROME_AGENT_FORK", "/tmp/fork/")
+	if Fork() != "/tmp/fork" {
+		t.Fatalf("CHROME_AGENT_FORK ignored or kept its trailing slash: %q", Fork())
 	}
 }
 
-func TestForkTrailingSlashIsStripped(t *testing.T) {
-	t.Setenv("CHROME_AGENT_FORK", "/tmp/fork/")
-	if got := SpoolClient(); got != "/tmp/fork/chromesendkeys.cjs" {
-		t.Fatalf("trailing slash on the fork leaked into a path: %q", got)
+// A fresh machine has no fork. The error must name the ONE command that fixes it, not a build step
+// for a checkout the user does not have.
+func TestMissingBrowserNamesEngineInstall(t *testing.T) {
+	t.Setenv("CHROMIUM_SENDKEYS_OUT", "")
+	t.Setenv("CHROME_AGENT_FORK", t.TempDir())
+	t.Setenv("CHROME_AGENT_ENGINE_DIR", t.TempDir())
+	err := RequireBinary()
+	if err == nil || !strings.Contains(err.Error(), "chrome-agent engine install") {
+		t.Fatalf("missing browser must point at engine install: %v", err)
+	}
+	if _, src := Binary(); src != "none" {
+		t.Fatalf("nothing installed must resolve as none, got %q", src)
+	}
+}
+
+// The installed engine outranks a dev build, and an explicit out dir outranks both.
+func TestBinaryResolutionOrder(t *testing.T) {
+	fork, eng := t.TempDir(), t.TempDir()
+	t.Setenv("CHROME_AGENT_FORK", fork)
+	t.Setenv("CHROME_AGENT_ENGINE_DIR", eng)
+	t.Setenv("CHROMIUM_SENDKEYS_OUT", "")
+	mk := func(p string) {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755)
+	}
+	mk(BinaryIn(filepath.Join(fork, "out", "Default")))
+	if _, src := Binary(); src != "fork" {
+		t.Fatalf("dev build only: want fork, got %s", src)
+	}
+	mk(BinaryIn(eng))
+	if b, src := Binary(); src != "engine" || b != BinaryIn(eng) {
+		t.Fatalf("installed engine must win over the fork: %s %s", b, src)
+	}
+	t.Setenv("CHROMIUM_SENDKEYS_OUT", "/somewhere")
+	if _, src := Binary(); src != "env" {
+		t.Fatalf("explicit out dir must win: %s", src)
 	}
 }

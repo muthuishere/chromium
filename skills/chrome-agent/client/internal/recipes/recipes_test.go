@@ -211,21 +211,22 @@ func TestPayloadShape(t *testing.T) {
 	}
 }
 
-// A chrome-agent builtin with no Go implementation must REFUSE, loudly, naming the bash verb. The
-// alternative — evaluating an empty body — returns {ok:true} and reads as a successful like.
-func TestUnimplementedBuiltinRefuses(t *testing.T) {
+// A react verb must REFUSE the `recipe` path, loudly, naming the site verb. It is not one page body
+// (it navigates, reads, clicks, re-reads), and `recipe` would skip the site verb's confirm gate and
+// pacing. The alternative — evaluating an empty body — returns {ok:true} and reads as a real like.
+func TestReactVerbRefusesTheRecipePath(t *testing.T) {
 	embeddedOnly(t)
 	r, err := Resolve("linkedin:like")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Fn != "" {
-		t.Fatal("linkedin:like has a Go implementation now — delete this test and add a real one")
+	if r.Class != ClassReact {
+		t.Fatalf("linkedin:like class = %q, want react", r.Class)
 	}
 	if _, err := Run(nil, "linkedin:like", "", Options{NoOrigin: true}); err == nil {
-		t.Fatal("Run must refuse a builtin with no Go implementation")
+		t.Fatal("Run must refuse a react verb")
 	} else if !strings.Contains(err.Error(), "chrome-agent linkedin like") {
-		t.Errorf("the refusal must name the bash verb to use, got: %v", err)
+		t.Errorf("the refusal must name the site verb to use, got: %v", err)
 	}
 }
 

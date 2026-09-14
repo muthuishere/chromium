@@ -124,6 +124,9 @@ func Discover(timeout time.Duration) []Instance {
 	return out
 }
 
+// StaleLock reports whether profile holds a SingletonLock left by a browser that is no longer running.
+func StaleLock(profile string) bool { return staleLock(profile) }
+
 // staleLock: SingletonLock is a SYMLINK to "<host>-<pid>", a target that never exists as a file — so
 // a plain existence check (which follows the link) reports "free" while a browser is running. Test
 // the link itself, then ask whether the pid is alive.
